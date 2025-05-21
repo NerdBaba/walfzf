@@ -5,9 +5,7 @@ Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, 
 ---
 
 ## Demo
-
-<video src="https://raw.githubusercontent.com/NerdBaba/walfzf/refs/heads/master/output.mp4" controls width="600" style="display:block; margin: 0 auto;"></video>
-
+![Demo](output.mp4)
 ---
 
 ## Why you'll love it

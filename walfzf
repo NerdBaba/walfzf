@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # --- Configuration ---
-APP_NAME="wallhaven-cli"
+APP_NAME="walfzf"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
 CONFIG_FILE="$CONFIG_DIR/config.sh" # This global var is critical
 API_BASE_URL="https://wallhaven.cc/api/v1"
@@ -26,11 +26,11 @@ DEFAULT_SEARCH_BACKGROUND_PRELOAD="false"
 # --- Utility Functions ---
 
 _log_error() {
-    echo "wallhaven-cli: Error: $1" >&2
+    echo "walfzf: Error: $1" >&2
 }
 _log_debug() {
     if [[ -n "${WALLHAVEN_CLI_DEBUG:-}" ]]; then
-        echo "wallhaven-cli: DEBUG: $1" >&2
+        echo "walfzf: DEBUG: $1" >&2
     fi
 }
 
@@ -58,6 +58,7 @@ _ensure_dirs() {
 
 _load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
+        mkdir -p "$CONFIG_DIR"
         echo "# $APP_NAME Configuration File" > "$CONFIG_FILE"
         echo "CONFIG_EDITOR=\"$DEFAULT_EDITOR\"" >> "$CONFIG_FILE"
         echo "CONFIG_SAVE_FOLDER=\"$DEFAULT_SAVE_FOLDER\"" >> "$CONFIG_FILE"
@@ -122,9 +123,9 @@ _dl_save() {
     local file_path="${folder}/${name}"
 
     mkdir -p "$folder"
-    echo "wallhaven-cli: Downloading $url to $file_path..." >&2
+    echo "walfzf: Downloading $url to $file_path..." >&2
     if curl -sLo "$file_path" "$url"; then
-        echo "wallhaven-cli: [download] $name saved to $file_path" >&2
+        echo "walfzf: [download] $name saved to $file_path" >&2
         return 0
     else
         _log_error "Failed to download $url to $file_path"
@@ -191,11 +192,11 @@ _handle_image_selection_loop() {
     local api_call_prefix=("$@")
 
     while true; do
-        echo "wallhaven-cli: Fetching page $current_page..." >&2
+        echo "walfzf: Fetching page $current_page..." >&2
         local images_response; images_response=$("${api_call_prefix[@]}" "$current_page") || return 1
 
         if [[ "$background_preload_active" == "true" ]]; then
-            echo "wallhaven-cli: Preloading all images for page $current_page before showing preview..." >&2
+            echo "walfzf: Preloading all images for page $current_page before showing preview..." >&2
             local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
             local preload_urls
             preload_urls=$(echo "$images_response" | jq -r '.data[]? | .path // empty')
@@ -290,7 +291,7 @@ _handle_image_selection_loop() {
         _log_debug "paginate_action: [${paginate_action}]"
 
         if [[ ${#urls_to_download[@]} -gt 0 ]]; then
-            echo "wallhaven-cli: Preparing to download ${#urls_to_download[@]} image(s)..." >&2
+            echo "walfzf: Preparing to download ${#urls_to_download[@]} image(s)..." >&2
             for dl_url in "${urls_to_download[@]}"; do _dl_save "$dl_url"; done
             return 0 
         elif [[ -n "$paginate_action" ]]; then
@@ -348,7 +349,7 @@ cmd_search() {
 cmd_download() {
     if [[ $# -eq 0 ]]; then _log_error "Image ID(s) required."; _usage; return 1; fi
     for image_id in "$@"; do
-        echo "wallhaven-cli: Fetching details for ID: $image_id..." >&2
+        echo "walfzf: Fetching details for ID: $image_id..." >&2
         local image_details=$(_api_get_image_details "$image_id") || continue 
         local image_url=$(echo "$image_details" | jq -r '.data.path')
         if [[ -z "$image_url" || "$image_url" == "null" ]]; then _log_error "Could not find URL for ID: $image_id"; continue; fi
@@ -361,20 +362,20 @@ cmd_collection() {
     if [[ ${#pos_args[@]} -eq 0 ]]; then _log_error "Username required."; _usage; return 1; fi
     username="${pos_args[0]}"; [[ ${#pos_args[@]} -gt 1 ]] && collection_id_arg="${pos_args[1]}"; local collection_id="$collection_id_arg"
     if [[ -z "$collection_id" ]]; then
-        echo "wallhaven-cli: Fetching collections for user: $username..." >&2
+        echo "walfzf: Fetching collections for user: $username..." >&2
         local collections_response=$(_api_list_user_collections "$username") || return 1
         if [[ "$(echo "$collections_response" | jq -r '.data | length')" -eq 0 ]]; then _log_error "No collections or user not found."; return 1; fi
         local fzf_collections_input=$(echo "$collections_response" | jq -r '.data[] | "\(.label) (\(.id))"')
         local selected_collection_str=$(_fzf_select "$fzf_collections_input" "false" "false") || { _log_error "No collection selected."; return 1; }
         collection_id=$(_extract_from_parens "$selected_collection_str"); if [[ -z "$collection_id" ]]; then _log_error "Could not extract ID from: $selected_collection_str"; return 1; fi
-    fi; echo "wallhaven-cli: Selected collection ID: $collection_id" >&2
+    fi; echo "walfzf: Selected collection ID: $collection_id" >&2
     if [[ "$download_all" -eq 1 ]]; then
-        echo "wallhaven-cli: Downloading all from collection $collection_id for $username..." >&2; local current_page=1
-        while true; do echo "wallhaven-cli: Fetching page $current_page..." >&2; local images_response=$(_api_get_collection_images "$username" "$collection_id" "$current_page") || break
+        echo "walfzf: Downloading all from collection $collection_id for $username..." >&2; local current_page=1
+        while true; do echo "walfzf: Fetching page $current_page..." >&2; local images_response=$(_api_get_collection_images "$username" "$collection_id" "$current_page") || break
             local images_in_page=$(echo "$images_response" | jq -r '.data[] | .path'); if [[ -z "$images_in_page" ]]; then echo "No more images." >&2; break; fi
             echo "$images_in_page" | while IFS= read -r image_url; do _dl_save "$image_url"; done
             if [[ "$current_page" -ge "$(echo "$images_response" | jq -r '.meta.last_page')" ]]; then echo "Last page reached." >&2; break; fi; current_page=$((current_page + 1))
-        done; echo "wallhaven-cli: Finished downloading all." >&2
+        done; echo "walfzf: Finished downloading all." >&2
     else _handle_image_selection_loop "$page" "false" _api_get_collection_images "$username" "$collection_id"; fi
 }
 
@@ -578,13 +579,13 @@ main() {
             # shellcheck source=/dev/null
             source "$cfg_path_preview"; 
         else
-            echo "wallhaven-cli: Preview Warning: Config '$cfg_path_preview' not found. Using defaults for preview temp folder." >&2
+            echo "walfzf: Preview Warning: Config '$cfg_path_preview' not found. Using defaults for preview temp folder." >&2
             CONFIG_TEMP_FOLDER="${DEFAULT_TEMP_FOLDER}"
         fi
         mkdir -p "$CONFIG_TEMP_FOLDER/preview_cache" 
 
         if [[ "${4:-}" == "preview" ]]; then cmd_preview "${@:5}"; exit $?;
-        else echo "wallhaven-cli: Error: Preview invocation structure incorrect. Expected 'preview <text_line>'." >&2; exit 1; fi
+        else echo "walfzf: Error: Preview invocation structure incorrect. Expected 'preview <text_line>'." >&2; exit 1; fi
     fi
 
     _ensure_deps; _load_config; _ensure_dirs 
