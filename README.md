@@ -4,6 +4,19 @@ Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, 
 
 ---
 
+## Demo
+
+
+https://user-images.githubusercontent.com/nerdbaba/walfzf/output.mp4
+
+<!-- If your platform supports it, you can use the video tag below instead:
+
+<video src="output.mp4" controls width="600"></video>
+
+-->
+
+---
+
 ## Why you'll love it
 
 - 🔍 **Fuzzy search**: Find wallpapers lightning-fast with [fzf](https://github.com/junegunn/fzf).
