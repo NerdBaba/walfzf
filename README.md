@@ -6,9 +6,10 @@ Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, 
 
 ## Demo
 
-<video src="https://raw.githubusercontent.com/NerdBaba/walfzf/refs/heads/master/output.mp4" controls width="600" style="display:block; margin: 0 auto;"></video>
 
----
+https://github.com/user-attachments/assets/bd8e222e-5f5c-4e24-99fc-60a989767e10
+
+
 
 ## Why you'll love it
 
