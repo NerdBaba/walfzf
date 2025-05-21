@@ -1,0 +1,607 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# --- Configuration ---
+APP_NAME="wallhaven-cli"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
+CONFIG_FILE="$CONFIG_DIR/config.sh" # This global var is critical
+API_BASE_URL="https://wallhaven.cc/api/v1"
+
+# Default Configuration Values (will be written to config.sh if it doesn't exist)
+DEFAULT_EDITOR="nano"
+DEFAULT_SAVE_FOLDER="$HOME/Pictures/wallpapers"
+DEFAULT_TEMP_FOLDER="/tmp/$APP_NAME"
+
+# Search Defaults
+DEFAULT_SEARCH_CATEGORIES_GENERAL="true"
+DEFAULT_SEARCH_CATEGORIES_ANIME="true"
+DEFAULT_SEARCH_CATEGORIES_PEOPLE="true"
+DEFAULT_SEARCH_ORDER="desc"
+DEFAULT_SEARCH_TOPRANGE="1M"
+DEFAULT_SEARCH_ATLEAST=""
+DEFAULT_SEARCH_RESOLUTIONS=""
+DEFAULT_SEARCH_RATIOS=""
+DEFAULT_SEARCH_BACKGROUND_PRELOAD="false"
+
+# --- Utility Functions ---
+
+_log_error() {
+    echo "wallhaven-cli: Error: $1" >&2
+}
+_log_debug() {
+    if [[ -n "${WALLHAVEN_CLI_DEBUG:-}" ]]; then
+        echo "wallhaven-cli: DEBUG: $1" >&2
+    fi
+}
+
+_ensure_deps() {
+    local missing=0
+    for dep in curl jq fzf file; do # Added 'file' command as a dependency
+        command -v "$dep" >/dev/null 2>&1 || { _log_error "$dep is not installed. Please install it."; missing=1; }
+    done
+    if command -v readlink >/dev/null 2>&1 && ! readlink -f . >/dev/null 2>&1; then
+        _log_error "Warning: readlink does not support -f. This might cause issues with preview paths if script is called via symlink."
+    elif ! command -v readlink >/dev/null 2>&1; then
+         _log_error "Warning: readlink command not found. This might cause issues with preview paths if script is called via symlink."
+    fi
+    if [[ "$missing" -eq 1 ]]; then
+        exit 1
+    fi
+}
+
+_ensure_dirs() {
+    mkdir -p "$CONFIG_DIR" \
+        "${CONFIG_SAVE_FOLDER}" \
+        "${CONFIG_TEMP_FOLDER}"
+    mkdir -p "${CONFIG_TEMP_FOLDER}/preview_cache"
+}
+
+_load_config() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "# $APP_NAME Configuration File" > "$CONFIG_FILE"
+        echo "CONFIG_EDITOR=\"$DEFAULT_EDITOR\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SAVE_FOLDER=\"$DEFAULT_SAVE_FOLDER\"" >> "$CONFIG_FILE"
+        echo "CONFIG_TEMP_FOLDER=\"$DEFAULT_TEMP_FOLDER\"" >> "$CONFIG_FILE"
+        echo "" >> "$CONFIG_FILE"
+        echo "# Search Parameters (see https://wallhaven.cc/help/api#search)" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_CATEGORIES_GENERAL=\"$DEFAULT_SEARCH_CATEGORIES_GENERAL\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_CATEGORIES_ANIME=\"$DEFAULT_SEARCH_CATEGORIES_ANIME\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_CATEGORIES_PEOPLE=\"$DEFAULT_SEARCH_CATEGORIES_PEOPLE\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_ORDER=\"$DEFAULT_SEARCH_ORDER\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_TOPRANGE=\"$DEFAULT_SEARCH_TOPRANGE\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_ATLEAST=\"$DEFAULT_SEARCH_ATLEAST\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_RESOLUTIONS=\"$DEFAULT_SEARCH_RESOLUTIONS\" # Comma-separated: \"1920x1080,2560x1440\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_RATIOS=\"$DEFAULT_SEARCH_RATIOS\"    # Comma-separated: \"16x9,21x9\"" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_BACKGROUND_PRELOAD=\"$DEFAULT_SEARCH_BACKGROUND_PRELOAD\" # Preload images on first page of search for faster previews (true/false)" >> "$CONFIG_FILE"
+        echo "Config file created at $CONFIG_FILE. Please review it."
+    fi
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+
+    CONFIG_EDITOR="${CONFIG_EDITOR:-$DEFAULT_EDITOR}"
+    CONFIG_SAVE_FOLDER="${CONFIG_SAVE_FOLDER:-$DEFAULT_SAVE_FOLDER}"
+    CONFIG_TEMP_FOLDER="${CONFIG_TEMP_FOLDER:-$DEFAULT_TEMP_FOLDER}"
+    CONFIG_SEARCH_CATEGORIES_GENERAL="${CONFIG_SEARCH_CATEGORIES_GENERAL:-$DEFAULT_SEARCH_CATEGORIES_GENERAL}"
+    CONFIG_SEARCH_CATEGORIES_ANIME="${CONFIG_SEARCH_CATEGORIES_ANIME:-$DEFAULT_SEARCH_CATEGORIES_ANIME}"
+    CONFIG_SEARCH_CATEGORIES_PEOPLE="${CONFIG_SEARCH_CATEGORIES_PEOPLE:-$DEFAULT_SEARCH_CATEGORIES_PEOPLE}"
+    CONFIG_SEARCH_ORDER="${CONFIG_SEARCH_ORDER:-$DEFAULT_SEARCH_ORDER}"
+    CONFIG_SEARCH_TOPRANGE="${CONFIG_SEARCH_TOPRANGE:-$DEFAULT_SEARCH_TOPRANGE}"
+    CONFIG_SEARCH_ATLEAST="${CONFIG_SEARCH_ATLEAST:-$DEFAULT_SEARCH_ATLEAST}"
+    CONFIG_SEARCH_RESOLUTIONS="${CONFIG_SEARCH_RESOLUTIONS:-$DEFAULT_SEARCH_RESOLUTIONS}"
+    CONFIG_SEARCH_RATIOS="${CONFIG_SEARCH_RATIOS:-$DEFAULT_SEARCH_RATIOS}"
+    CONFIG_SEARCH_BACKGROUND_PRELOAD="${CONFIG_SEARCH_BACKGROUND_PRELOAD:-$DEFAULT_SEARCH_BACKGROUND_PRELOAD}"
+}
+
+_urlencode() {
+    jq -nr --arg str "$1" '$str|@uri'
+}
+
+_make_request() {
+    local url="$1"
+    _log_debug "Making API request to: $url"
+    response=$(curl -sL "$url")
+    if [[ $? -ne 0 ]]; then
+        _log_error "Failed to make request to $url"
+        return 1
+    fi
+    if echo "$response" | jq -e '.error' > /dev/null; then
+        error_message=$(echo "$response" | jq -r '.error')
+        _log_error "API Error for $url: $error_message"
+        return 1
+    fi
+    _log_debug "API response received."
+    echo "$response"
+}
+
+_dl_save() {
+    local url="$1"
+    local folder="${2:-$CONFIG_SAVE_FOLDER}"
+    local name
+    name=$(basename "$url")
+    name="${name%%\?*}" 
+    local file_path="${folder}/${name}"
+
+    mkdir -p "$folder"
+    echo "wallhaven-cli: Downloading $url to $file_path..." >&2
+    if curl -sLo "$file_path" "$url"; then
+        echo "wallhaven-cli: [download] $name saved to $file_path" >&2
+        return 0
+    else
+        _log_error "Failed to download $url to $file_path"
+        rm -f "$file_path" 
+        return 1
+    fi
+}
+
+_extract_from_parens() {
+    echo "$1" | sed -n 's/.*(\([^)]*\)).*/\1/p'
+}
+
+_fzf_select() {
+    local input="$1"
+    local enable_preview="$2"
+    local allow_multi_select="${3:-false}"
+    local fzf_opts=("--border" "--reverse" "--preview-window=right:70%:wrap:border-sharp")
+
+    if [[ "$allow_multi_select" == "true" ]]; then
+        fzf_opts+=("-m" "--bind=enter:accept")
+        fzf_opts+=("--header=TAB/Shift-TAB to select/deselect, Enter to confirm.")
+    else
+        fzf_opts+=("--bind=enter:accept")
+    fi
+
+    if [[ "$enable_preview" == "true" ]]; then
+        local script_abs_path
+        if command -v readlink &>/dev/null && readlink -f "${BASH_SOURCE[0]}" &>/dev/null; then
+            script_abs_path=$(readlink -f "${BASH_SOURCE[0]}")
+        else
+            script_abs_path="${BASH_SOURCE[0]}"
+        fi
+        fzf_opts+=("--preview=$script_abs_path --is-preview --actual-config-path '$CONFIG_FILE' preview {}")
+    fi
+    _log_debug "Starting fzf with options: ${fzf_opts[*]}"
+    selection=$(echo -e "$input" | fzf "${fzf_opts[@]}")
+    if [[ -z "$selection" ]]; then
+        _log_debug "fzf selection cancelled or empty."
+        return 1 
+    fi
+    _log_debug "fzf selection made."
+    echo "$selection"
+    return 0
+}
+
+_api_search_images() {
+    local query="$1"; local page="$2"; local params="q=$(_urlencode "$query")&page=$page"
+    local c_g=0 c_a=0 c_p=0
+    [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
+    params="$params&categories=${c_g}${c_a}${c_p}&order=$(_urlencode "$CONFIG_SEARCH_ORDER")&topRange=$(_urlencode "$CONFIG_SEARCH_TOPRANGE")"
+    [[ -n "$CONFIG_SEARCH_ATLEAST" ]] && params="$params&atleast=$(_urlencode "$CONFIG_SEARCH_ATLEAST")"
+    [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
+    [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
+    _make_request "$API_BASE_URL/search?$params"
+}
+_api_get_image_details() { _make_request "$API_BASE_URL/w/$1"; }
+_api_list_user_collections() { _make_request "$API_BASE_URL/collections/$(_urlencode "$1")"; }
+_api_get_collection_images() { _make_request "$API_BASE_URL/collections/$(_urlencode "$1")/$2?page=$3"; }
+
+_handle_image_selection_loop() {
+    local current_page="$1"
+    local background_preload_active="$2" 
+    shift 2 
+    local api_call_prefix=("$@")
+
+    while true; do
+        echo "wallhaven-cli: Fetching page $current_page..." >&2
+        local images_response; images_response=$("${api_call_prefix[@]}" "$current_page") || return 1
+
+        if [[ "$background_preload_active" == "true" ]]; then
+            echo "wallhaven-cli: Preloading all images for page $current_page before showing preview..." >&2
+            local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
+            local preload_urls
+            preload_urls=$(echo "$images_response" | jq -r '.data[]? | .path // empty')
+            if [[ -n "$preload_urls" ]]; then
+                local total=0; local done=0
+                mapfile -t preload_url_array < <(printf "%s\n" "$preload_urls")
+                total=${#preload_url_array[@]}
+                # Parallel download with concurrency limit
+                local -a pids=()
+                local max_parallel=6
+                local completed=0
+                for idx in "${!preload_url_array[@]}"; do
+                    image_url_to_preload="${preload_url_array[$idx]}"
+                    if [[ -n "$image_url_to_preload" && "$image_url_to_preload" != "null" ]]; then
+                        local filename; filename=$(basename "$image_url_to_preload"); filename="${filename%%\?*}"
+                        local temp_image_file="$temp_preview_dir/$filename"
+                        if [[ ! -f "$temp_image_file" ]]; then
+                            _log_debug "Preloading: $image_url_to_preload to $temp_image_file"
+                            (
+                                curl -sLo "$temp_image_file" "$image_url_to_preload" > /dev/null 2>&1
+                                status=$?
+                                if [[ $status -ne 0 ]]; then echo "\nFailed: $image_url_to_preload" >&2; fi
+                                completed=$((completed+1))
+                                printf "\rDownloading %d/%d..." "$completed" "$total"
+                            ) &
+                            pids+=("$!")
+                            # Limit concurrency
+                            if (( ${#pids[@]} >= max_parallel )); then
+                                wait -n 2>/dev/null || wait ${pids[0]}
+                                # Remove finished jobs from pids
+                                for i in "${!pids[@]}"; do
+                                    if ! kill -0 "${pids[$i]}" 2>/dev/null; then unset 'pids[$i]'; fi
+                                done
+                            fi
+                        else
+                            _log_debug "Already cached (preload skip): $temp_image_file"
+                            completed=$((completed+1))
+                            printf "\rDownloading %d/%d..." "$completed" "$total"
+                        fi
+                    fi
+                done
+                # Wait for all remaining jobs
+                wait
+                printf "\rPreloading complete: %d/%d images downloaded.\n" "$total" "$total"
+            fi
+        fi
+
+        local images_data=$(echo "$images_response" | jq -r '.data')
+        if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 && "$current_page" -eq 1 ]]; then _log_error "No images found."; return 1; fi
+        if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then _log_error "No images on this page."; fi
+
+        local fzf_input=""; local last_page
+        last_page=$(echo "$images_response" | jq -r '.meta.last_page // 1') 
+        if [[ "$current_page" -lt "$last_page" ]]; then fzf_input+="Next page -->\n"; fi
+        if [[ "$current_page" -gt 1 ]]; then fzf_input+="Previous page <--\n"; fi
+        if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -gt 0 ]]; then
+            fzf_input+=$(echo "$images_data" | jq -r '.[] | "\(.id) \(.resolution) (\(.path))"')
+        fi
+        
+        if [[ -z "$fzf_input" && "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then
+            _log_error "No items to display (no images, no pagination options)."
+            if [[ "$current_page" -gt 1 ]]; then _log_error "Auto-returning to previous page."; current_page=$((current_page - 1)); continue; fi
+            return 1
+        fi
+        
+        local selections; selections=$(_fzf_select "$fzf_input" "true" "true") || { _log_error "Selection cancelled by user."; return 1; }
+        _log_debug "fzf returned selections: <<<${selections}>>>"
+
+        local paginate_action=""; local urls_to_download=()
+
+        while IFS= read -r selection_line; do
+            if [[ -z "$selection_line" ]]; then _log_debug "Skipping empty selection line."; continue; fi
+            _log_debug "Processing selection line: [${selection_line}]"
+            if echo "$selection_line" | grep -qE -- "(Next page -->|-->$)"; then 
+                if [[ -z "$paginate_action" ]]; then paginate_action="next"; _log_debug "Pagination action set to NEXT."; fi
+            elif echo "$selection_line" | grep -qE -- "(Previous page <--|<--$)"; then 
+                if [[ -z "$paginate_action" ]]; then paginate_action="prev"; _log_debug "Pagination action set to PREV."; fi
+            else
+                _log_debug "Attempting to treat as image line: [${selection_line}]"
+                local url_from_line=$(_extract_from_parens "$selection_line")
+                _log_debug "Extracted URL: [${url_from_line}]"
+                if [[ -n "$url_from_line" ]]; then
+                    urls_to_download+=("$url_from_line")
+                    _log_debug "Added URL to download list: ${url_from_line}"
+                else
+                    _log_error "Could not extract URL from line: ${selection_line}"
+                fi
+            fi
+        done < <(printf "%s\n" "$selections")
+
+        _log_debug "urls_to_download count: ${#urls_to_download[@]}"
+        _log_debug "paginate_action: [${paginate_action}]"
+
+        if [[ ${#urls_to_download[@]} -gt 0 ]]; then
+            echo "wallhaven-cli: Preparing to download ${#urls_to_download[@]} image(s)..." >&2
+            for dl_url in "${urls_to_download[@]}"; do _dl_save "$dl_url"; done
+            return 0 
+        elif [[ -n "$paginate_action" ]]; then
+            if [[ "$paginate_action" == "next" ]]; then current_page=$((current_page + 1));
+            elif [[ "$paginate_action" == "prev" ]]; then current_page=$((current_page - 1));
+            fi
+        else
+            _log_error "No valid selection made (no downloads, no pagination after processing fzf output)."
+            return 1 
+        fi
+    done
+}
+
+cmd_search() {
+    local page=1
+    local background_preload_cmd_flag="false"
+    local query_args=()
+
+    local found_query=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--page)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then page="$2"; shift 2;
+                else _log_error "Invalid page number for -p/--page: ${2:-}"; return 1; fi ;;
+            -b|--background-preload)
+                background_preload_cmd_flag="true"
+                shift ;;
+            --)
+                shift
+                ;;
+            -*) _log_error "Unknown option for search: $1"; _usage; return 1 ;;
+            *)
+                if [[ $found_query -eq 0 ]]; then
+                    query_args+=("$1")
+                    found_query=1
+                    shift
+                else
+                    _log_error "Too many arguments for search. Only one query string is allowed."; _usage; return 1
+                fi
+                ;;
+        esac
+    done
+
+    if [[ ${#query_args[@]} -eq 0 ]]; then _log_error "Search query required."; _usage; return 1; fi
+
+    local effective_preload_setting="$CONFIG_SEARCH_BACKGROUND_PRELOAD"
+    if [[ "$background_preload_cmd_flag" == "true" ]]; then
+        effective_preload_setting="true"
+        _log_debug "Search: Background preload overridden by command line flag."
+    fi
+    _log_debug "Search: Effective background preload setting: $effective_preload_setting"
+    _handle_image_selection_loop "$page" "$effective_preload_setting" _api_search_images "${query_args[*]}"
+}
+
+cmd_download() {
+    if [[ $# -eq 0 ]]; then _log_error "Image ID(s) required."; _usage; return 1; fi
+    for image_id in "$@"; do
+        echo "wallhaven-cli: Fetching details for ID: $image_id..." >&2
+        local image_details=$(_api_get_image_details "$image_id") || continue 
+        local image_url=$(echo "$image_details" | jq -r '.data.path')
+        if [[ -z "$image_url" || "$image_url" == "null" ]]; then _log_error "Could not find URL for ID: $image_id"; continue; fi
+        _dl_save "$image_url"
+    done
+}
+cmd_edit() { if [[ -n "$CONFIG_EDITOR" ]]; then "$CONFIG_EDITOR" "$CONFIG_FILE"; else _log_error "Editor not configured."; return 1; fi; }
+cmd_collection() {
+    local page=1 download_all=0 username="" collection_id_arg="" pos_args=(); while [[ $# -gt 0 ]]; do case "$1" in -p|--page) page="$2"; shift 2;; -a|--all) download_all=1; shift;; --) shift; pos_args+=("$@");break;; *) pos_args+=("$1");shift;; esac; done
+    if [[ ${#pos_args[@]} -eq 0 ]]; then _log_error "Username required."; _usage; return 1; fi
+    username="${pos_args[0]}"; [[ ${#pos_args[@]} -gt 1 ]] && collection_id_arg="${pos_args[1]}"; local collection_id="$collection_id_arg"
+    if [[ -z "$collection_id" ]]; then
+        echo "wallhaven-cli: Fetching collections for user: $username..." >&2
+        local collections_response=$(_api_list_user_collections "$username") || return 1
+        if [[ "$(echo "$collections_response" | jq -r '.data | length')" -eq 0 ]]; then _log_error "No collections or user not found."; return 1; fi
+        local fzf_collections_input=$(echo "$collections_response" | jq -r '.data[] | "\(.label) (\(.id))"')
+        local selected_collection_str=$(_fzf_select "$fzf_collections_input" "false" "false") || { _log_error "No collection selected."; return 1; }
+        collection_id=$(_extract_from_parens "$selected_collection_str"); if [[ -z "$collection_id" ]]; then _log_error "Could not extract ID from: $selected_collection_str"; return 1; fi
+    fi; echo "wallhaven-cli: Selected collection ID: $collection_id" >&2
+    if [[ "$download_all" -eq 1 ]]; then
+        echo "wallhaven-cli: Downloading all from collection $collection_id for $username..." >&2; local current_page=1
+        while true; do echo "wallhaven-cli: Fetching page $current_page..." >&2; local images_response=$(_api_get_collection_images "$username" "$collection_id" "$current_page") || break
+            local images_in_page=$(echo "$images_response" | jq -r '.data[] | .path'); if [[ -z "$images_in_page" ]]; then echo "No more images." >&2; break; fi
+            echo "$images_in_page" | while IFS= read -r image_url; do _dl_save "$image_url"; done
+            if [[ "$current_page" -ge "$(echo "$images_response" | jq -r '.meta.last_page')" ]]; then echo "Last page reached." >&2; break; fi; current_page=$((current_page + 1))
+        done; echo "wallhaven-cli: Finished downloading all." >&2
+    else _handle_image_selection_loop "$page" "false" _api_get_collection_images "$username" "$collection_id"; fi
+}
+
+cmd_preview() {
+    local text_line="$1"
+
+    _clear_preview_pane_text_content() { # Clears entire preview pane
+        if command -v tput >/dev/null && [ -t 1 ]; then tput clear;
+        elif [ -t 1 ]; then printf "\033c"; fi
+    }
+    _cursor_home_and_clear_line() { # Moves cursor to home (1,1) and clears that line
+         printf "\033[H\033[K" # \033[H: Cursor to Home (1,1), \033[K: Erase to end of line
+    }
+
+    local success_messages=("Preview loaded!" "Image ready." "Displayed." "Voilà!" "Rendered.")
+    _print_kitty_success_text_on_first_line() {
+        _cursor_home_and_clear_line # This handles clearing what was on the first line (e.g. spinner)
+        local r_idx=$((RANDOM % ${#success_messages[@]})); echo "${success_messages[$r_idx]}"
+    }
+
+    if echo "$text_line" | grep -Eq -- "(Next page -->|Previous page <--)"; then
+        _clear_preview_pane_text_content
+        echo "Pagination Item - No Preview"
+        return 0
+    fi
+
+    local image_url
+    if grep -oP '\(\K[^)]+' <<< "$text_line" &>/dev/null; then image_url=$(grep -oP '\(\K[^)]+' <<< "$text_line");
+    else image_url=$(_extract_from_parens "$text_line"); fi
+
+    if [[ -z "$image_url" ]]; then
+        _clear_preview_pane_text_content 
+        echo "Preview Error: Could not extract URL from: $text_line"
+        return 1
+    fi
+
+    local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
+    local filename; filename=$(basename "$image_url"); filename="${filename%%\?*}"
+    local temp_image_file="$temp_preview_dir/$filename"
+
+    # Always clear the preview pane and show a loading message before any operation
+    _clear_preview_pane_text_content
+    printf "[Previewing...]\n"
+    # Flush output to ensure the user sees the blank/loading state immediately
+    sleep 0.03
+    
+    if [[ ! -f "$temp_image_file" ]]; then
+        _log_debug "Preview: '$filename' not in cache. Downloading from $image_url"
+        
+        local spinner_chars=("|" "/" "-" "\\")
+        local spin_i=0
+        printf "\033[H" # Move cursor to home (1,1) for spinner start
+        echo -n "${spinner_chars[$spin_i]} Loading..." # Start spinner with message
+        
+        curl -sL --max-time 15 -o "$temp_image_file" "$image_url" &
+        local curl_pid=$!
+
+        while kill -0 $curl_pid 2>/dev/null; do
+            spin_i=$(((spin_i + 1) % 4))
+            echo -ne "\033[H${spinner_chars[$spin_i]} Loading..." # Update spinner at home position
+            sleep 0.1
+        done
+        wait $curl_pid
+        local curl_exit_code=$?
+        
+        # Overwrite the loading line after download attempt
+        printf "\033[H\033[K"
+
+        if [[ "$curl_exit_code" -ne 0 ]]; then
+            # Error message will now appear on the cleared first line
+            echo "Preview Download Error (code $curl_exit_code): $image_url"
+            _log_error "Curl failed ($curl_exit_code) for $image_url"
+            rm -f "$temp_image_file" 
+            return 1
+        fi
+        _log_debug "Preview: '$filename' downloaded to $temp_image_file"
+    else
+        # Overwrite the loading line if using cached image
+        printf "\033[H\033[K"
+        _log_debug "Preview: Using cached '$filename' from $temp_image_file"
+    fi
+
+    # Check if the cached image is valid and fix if needed
+    local file_type
+    file_type=$(file -b "$temp_image_file" 2>/dev/null || echo "unknown")
+    _log_debug "File details for $temp_image_file: $file_type"
+    
+    # If the file is not a valid image or has issues, try to fix it with convert
+    if ! echo "$file_type" | grep -qi "image"; then
+        _log_debug "Invalid image detected: $temp_image_file. Attempting to fix or re-download."
+        if command -v convert &>/dev/null; then
+            _log_debug "Attempting to fix image with ImageMagick"
+            local temp_fixed_file="${temp_image_file}.fixed"
+            if convert "$temp_image_file" -auto-orient "$temp_fixed_file" 2>/dev/null; then
+                mv "$temp_fixed_file" "$temp_image_file"
+                _log_debug "Image fixed successfully"
+            else
+                _log_debug "ImageMagick conversion failed, re-downloading image"
+                rm -f "$temp_image_file"
+                _cursor_home_and_clear_line
+                echo "Re-downloading corrupted image..."
+                if ! curl -sL --max-time 15 -o "$temp_image_file" "$image_url"; then
+                    echo "Preview: Failed to re-download image. URL: $image_url"
+                    return 1
+                fi
+            fi
+        else
+            # If convert is not available, just re-download
+            _log_debug "ImageMagick not available, re-downloading image"
+            rm -f "$temp_image_file"
+            _cursor_home_and_clear_line
+            echo "Re-downloading corrupted image..."
+            if ! curl -sL --max-time 15 -o "$temp_image_file" "$image_url"; then
+                echo "Preview: Failed to re-download image. URL: $image_url"
+                return 1
+            fi
+        fi
+    fi
+
+    local fzf_cols="${FZF_PREVIEW_COLUMNS:-80}"; local fzf_lines="${FZF_PREVIEW_LINES:-24}"
+
+    # Always ensure the preview pane is clear before attempting to display an image
+    _clear_preview_pane_text_content
+    
+    if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitty &>/dev/null; then
+        _log_debug "Attempting Kitty preview for $temp_image_file"
+        if kitty icat --clear --silent --align=left --transfer-mode=stream --stdin=no --place="${fzf_cols}x${fzf_lines}@0x0" --scale-up "$temp_image_file"; then
+            _print_kitty_success_text_on_first_line
+            return 0
+        fi
+        _log_debug "Kitty icat failed for $temp_image_file. Trying Chafa."
+        _clear_preview_pane_text_content # Clear any Kitty remnants before Chafa
+    fi
+
+    if command -v chafa &>/dev/null; then
+        _log_debug "Attempting Chafa preview for $temp_image_file"
+        if [[ -f "$temp_image_file" ]]; then 
+            # Always ensure the preview pane is clear before attempting Chafa
+            _clear_preview_pane_text_content
+            
+            if chafa --clear --animate=false "$temp_image_file"; then
+                return 0
+            fi
+            _log_debug "Chafa failed for $temp_image_file."
+            _clear_preview_pane_text_content # Clear any Chafa remnants
+        else
+             _log_debug "Cached file $temp_image_file seems to have disappeared before Chafa could use it."
+             _clear_preview_pane_text_content # Ensure pane is clear
+        fi
+    fi
+    
+    _clear_preview_pane_text_content # Final clear for the fallback error message
+    echo "Preview: No suitable previewer or image issue. URL: $image_url (tried cache: $temp_image_file)"
+    return 1
+}
+
+
+_usage() {
+    local script_name; if [[ -n "${BASH_SOURCE[0]}" && -f "${BASH_SOURCE[0]}" ]]; then script_name=$(basename "${BASH_SOURCE[0]}"); else script_name="wallhaven.sh"; fi
+    cat <<EOF
+$script_name - Search and download wallpapers from wallhaven.cc
+
+Usage:
+  $script_name [command] [options] [arguments]
+
+Commands:
+  search (s) <query> [options]
+    Search for wallpapers.
+    Options for search:
+      -p <page>, --page <page>        Start search from a specific page number.
+      -b, --background-preload        Preload images on the first page for faster previews.
+                                      (Overrides config if specified).
+
+  download (d) <image_id...>
+    Download specific image(s) by their Wallhaven ID.
+
+  collection (c) <username> [collection_id] [options]
+    Browse and download from a user's public collections.
+    If collection_id is omitted, lists user's collections to choose from.
+    Options for collection:
+      -p <page>, --page <page>        Start browsing collection from a specific page.
+      -a, --all                       Download all images from the selected collection.
+
+  edit (e)
+    Open the configuration file in the defined editor.
+
+  help (h), --help, -h
+    Show this help message.
+
+Configuration File: $CONFIG_FILE
+Debug messages (sent to stderr), including image file checks for previews,
+can be enabled by setting the WALLHAVEN_CLI_DEBUG=1 environment variable.
+Example: WALLHAVEN_CLI_DEBUG=1 $script_name search nature
+EOF
+}
+
+main() {
+    if [[ "${1:-}" == "--is-preview" && "${2:-}" == "--actual-config-path" ]]; then
+        local cfg_path_preview="$3"; cfg_path_preview="${cfg_path_preview#\'}"; cfg_path_preview="${cfg_path_preview%\'}" 
+        if [[ -f "$cfg_path_preview" ]]; then 
+            # shellcheck source=/dev/null
+            source "$cfg_path_preview"; 
+        else
+            echo "wallhaven-cli: Preview Warning: Config '$cfg_path_preview' not found. Using defaults for preview temp folder." >&2
+            CONFIG_TEMP_FOLDER="${DEFAULT_TEMP_FOLDER}"
+        fi
+        mkdir -p "$CONFIG_TEMP_FOLDER/preview_cache" 
+
+        if [[ "${4:-}" == "preview" ]]; then cmd_preview "${@:5}"; exit $?;
+        else echo "wallhaven-cli: Error: Preview invocation structure incorrect. Expected 'preview <text_line>'." >&2; exit 1; fi
+    fi
+
+    _ensure_deps; _load_config; _ensure_dirs 
+
+    local COMMAND="${1:-help}" 
+    [[ $# -gt 0 ]] && shift || true 
+    
+    case "$COMMAND" in
+        search|s) cmd_search "$@" ;;
+        download|d) cmd_download "$@" ;;
+        edit|e) cmd_edit "$@" ;;
+        collection|c) cmd_collection "$@" ;;
+        help|h|--help|-h) _usage ;;
+        *) _log_error "Unknown command: $COMMAND"; _usage; exit 1 ;;
+    esac
+}
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
