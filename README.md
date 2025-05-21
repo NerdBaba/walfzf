@@ -6,8 +6,7 @@ Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, 
 
 ## Demo
 
-<video src="output.mp4" controls width="600"></video>
-
+<video src="output.mp4" controls width="600" style="display:block; margin: 0 auto;"></video>
 
 ---
 
