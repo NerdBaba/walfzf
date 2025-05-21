@@ -1,4 +1,4 @@
-# walfzf: Your Terminal Wallpaper Buddy 🌄
+# walfzf 🌄
 
 Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, preview, and download gorgeous wallpapers from [wallhaven.cc](https://wallhaven.cc) right from your terminal. With fuzzy search, in-terminal previews, and a dead-simple config, finding your next wallpaper is actually fun. No more endless browser tabs or cluttered downloads — just type, search, and enjoy!
 
