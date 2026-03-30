@@ -124,7 +124,7 @@ _dl_save() {
 
     mkdir -p "$folder"
     echo "walfzf: Downloading $url to $file_path..." >&2
-    if curl -sLo "$file_path" "$url"; then
+    if curl -sL --compressed -o "$file_path" "$url"; then
         echo "walfzf: [download] $name saved to $file_path" >&2
         return 0
     else
@@ -137,6 +137,7 @@ _dl_save() {
 _extract_from_parens() {
     echo "$1" | sed -n 's/.*(\([^)]*\)).*/\1/p'
 }
+
 
 _fzf_select() {
     local input="$1"
@@ -158,7 +159,9 @@ _fzf_select() {
         else
             script_abs_path="${BASH_SOURCE[0]}"
         fi
-        fzf_opts+=("--preview=$script_abs_path --is-preview --actual-config-path '$CONFIG_FILE' preview {}")
+        local preview_cmd="$script_abs_path --is-preview --actual-config-path '$CONFIG_FILE'"
+        [[ "${THUMB_MODE:-}" == "true" ]] && preview_cmd="$preview_cmd --thumb-mode"
+        fzf_opts+=("--preview=$preview_cmd preview {}")
     fi
     _log_debug "Starting fzf with options: ${fzf_opts[*]}"
     selection=$(echo -e "$input" | fzf "${fzf_opts[@]}")
@@ -181,6 +184,35 @@ _api_search_images() {
     [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
     _make_request "$API_BASE_URL/search?$params"
 }
+_api_latest_images() {
+    local page="$1"; local params="sorting=date_added&page=$page"
+    local c_g=0 c_a=0 c_p=0
+    [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
+    params="$params&categories=${c_g}${c_a}${c_p}"
+    [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
+    [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
+    _make_request "$API_BASE_URL/search?$params"
+}
+_api_toplist_images() {
+    local top_range="${1:-$CONFIG_SEARCH_TOPRANGE}"; local page="${2:-1}"
+    local params="sorting=toplist&topRange=$(_urlencode "$top_range")&page=$page"
+    local c_g=0 c_a=0 c_p=0
+    [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
+    params="$params&categories=${c_g}${c_a}${c_p}"
+    [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
+    [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
+    _make_request "$API_BASE_URL/search?$params"
+}
+_api_random_images() {
+    local seed="${1:-}"; local page="${2:-1}"; local params="sorting=random&page=$page"
+    [[ -n "$seed" ]] && params="$params&seed=$(_urlencode "$seed")"
+    local c_g=0 c_a=0 c_p=0
+    [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
+    params="$params&categories=${c_g}${c_a}${c_p}"
+    [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
+    [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
+    _make_request "$API_BASE_URL/search?$params"
+}
 _api_get_image_details() { _make_request "$API_BASE_URL/w/$1"; }
 _api_list_user_collections() { _make_request "$API_BASE_URL/collections/$(_urlencode "$1")"; }
 _api_get_collection_images() { _make_request "$API_BASE_URL/collections/$(_urlencode "$1")/$2?page=$3"; }
@@ -196,51 +228,81 @@ _handle_image_selection_loop() {
         local images_response; images_response=$("${api_call_prefix[@]}" "$current_page") || return 1
 
         if [[ "$background_preload_active" == "true" ]]; then
-            echo "walfzf: Preloading all images for page $current_page before showing preview..." >&2
+            echo "walfzf: Preloading all images for page $current_page..." >&2
             local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
+            local url_list_file="$temp_preview_dir/.current_urls.txt"
             local preload_urls
-            preload_urls=$(echo "$images_response" | jq -r '.data[]? | .path // empty')
+            if [[ "${THUMB_MODE:-}" == "true" ]]; then
+                preload_urls=$(echo "$images_response" | jq -r '.data[]? | .thumbs.large // .path // empty')
+            else
+                preload_urls=$(echo "$images_response" | jq -r '.data[]? | .path // empty')
+            fi
             if [[ -n "$preload_urls" ]]; then
-                local total=0; local done=0
                 mapfile -t preload_url_array < <(printf "%s\n" "$preload_urls")
-                total=${#preload_url_array[@]}
-                # Parallel download with concurrency limit
-                local -a pids=()
-                local max_parallel=6
-                local completed=0
+                local total=${#preload_url_array[@]}
+                local uncached=0
+                local parallel_config="$temp_preview_dir/.parallel_preload.cfg"
+                > "$parallel_config"
+                > "$url_list_file"
+
                 for idx in "${!preload_url_array[@]}"; do
                     image_url_to_preload="${preload_url_array[$idx]}"
                     if [[ -n "$image_url_to_preload" && "$image_url_to_preload" != "null" ]]; then
+                        echo "$image_url_to_preload" >> "$url_list_file"
                         local filename; filename=$(basename "$image_url_to_preload"); filename="${filename%%\?*}"
                         local temp_image_file="$temp_preview_dir/$filename"
                         if [[ ! -f "$temp_image_file" ]]; then
-                            _log_debug "Preloading: $image_url_to_preload to $temp_image_file"
-                            (
-                                curl -sLo "$temp_image_file" "$image_url_to_preload" > /dev/null 2>&1
-                                status=$?
-                                if [[ $status -ne 0 ]]; then echo "\nFailed: $image_url_to_preload" >&2; fi
-                                completed=$((completed+1))
-                                printf "\rDownloading %d/%d..." "$completed" "$total"
-                            ) &
-                            pids+=("$!")
-                            # Limit concurrency
-                            if (( ${#pids[@]} >= max_parallel )); then
-                                wait -n 2>/dev/null || wait ${pids[0]}
-                                # Remove finished jobs from pids
-                                for i in "${!pids[@]}"; do
-                                    if ! kill -0 "${pids[$i]}" 2>/dev/null; then unset 'pids[$i]'; fi
-                                done
-                            fi
-                        else
-                            _log_debug "Already cached (preload skip): $temp_image_file"
-                            completed=$((completed+1))
-                            printf "\rDownloading %d/%d..." "$completed" "$total"
+                            printf 'url = "%s"\noutput = "%s"\n\n' "$image_url_to_preload" "$temp_image_file" >> "$parallel_config"
+                            uncached=$((uncached + 1))
                         fi
                     fi
                 done
-                # Wait for all remaining jobs
-                wait
-                printf "\rPreloading complete: %d/%d images downloaded.\n" "$total" "$total"
+
+                if [[ "$uncached" -gt 0 ]]; then
+                    printf "Preloading %d/%d images...\r" "$uncached" "$total" >&2
+                    if curl --parallel --parallel-max 8 --compressed --silent \
+                        --connect-timeout 10 --config "$parallel_config" 2>/dev/null; then
+                        printf "Preloaded %d/%d images.         \n" "$uncached" "$total" >&2
+                    else
+                        printf "Preload finished with errors.   \n" >&2
+                    fi
+                else
+                    echo "All $total images already cached." >&2
+                fi
+                rm -f "$parallel_config"
+            fi
+        else
+            # Lazy preload: write URL list for neighbor prefetch and start bg download
+            local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
+            local url_list_file="$temp_preview_dir/.current_urls.txt"
+            local preload_urls
+            if [[ "${THUMB_MODE:-}" == "true" ]]; then
+                preload_urls=$(echo "$images_response" | jq -r '.data[]? | .thumbs.large // .path // empty')
+            else
+                preload_urls=$(echo "$images_response" | jq -r '.data[]? | .path // empty')
+            fi
+            if [[ -n "$preload_urls" ]]; then
+                > "$url_list_file"
+                local parallel_config="$temp_preview_dir/.parallel_preload.cfg"
+                > "$parallel_config"
+                local uncached=0
+                while IFS= read -r image_url_to_preload; do
+                    if [[ -n "$image_url_to_preload" && "$image_url_to_preload" != "null" ]]; then
+                        echo "$image_url_to_preload" >> "$url_list_file"
+                        local filename; filename=$(basename "$image_url_to_preload"); filename="${filename%%\?*}"
+                        local temp_image_file="$temp_preview_dir/$filename"
+                        if [[ ! -f "$temp_image_file" ]]; then
+                            printf 'url = "%s"\noutput = "%s"\n\n' "$image_url_to_preload" "$temp_image_file" >> "$parallel_config"
+                            uncached=$((uncached + 1))
+                        fi
+                    fi
+                done <<< "$preload_urls"
+                if [[ "$uncached" -gt 0 ]]; then
+                    curl --parallel --parallel-max 4 --compressed --silent \
+                        --connect-timeout 10 --config "$parallel_config" 2>/dev/null &
+                    echo "walfzf: Preloading $uncached image(s) in background..." >&2
+                fi
+                rm -f "$parallel_config"
             fi
         fi
 
@@ -253,7 +315,7 @@ _handle_image_selection_loop() {
         if [[ "$current_page" -lt "$last_page" ]]; then fzf_input+="Next page -->\n"; fi
         if [[ "$current_page" -gt 1 ]]; then fzf_input+="Previous page <--\n"; fi
         if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -gt 0 ]]; then
-            fzf_input+=$(echo "$images_data" | jq -r '.[] | "\(.id) \(.resolution) (\(.path))"')
+            fzf_input+=$(echo "$images_data" | jq -r '.[] | "\(.id) \(.resolution) (\(.path)|\(.thumbs.large // .path))"')
         fi
         
         if [[ -z "$fzf_input" && "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then
@@ -277,6 +339,7 @@ _handle_image_selection_loop() {
             else
                 _log_debug "Attempting to treat as image line: [${selection_line}]"
                 local url_from_line=$(_extract_from_parens "$selection_line")
+                url_from_line="${url_from_line%%|*}" # Use full URL (before pipe) for download
                 _log_debug "Extracted URL: [${url_from_line}]"
                 if [[ -n "$url_from_line" ]]; then
                     urls_to_download+=("$url_from_line")
@@ -319,6 +382,7 @@ cmd_search() {
             -b|--background-preload)
                 background_preload_cmd_flag="true"
                 shift ;;
+            -t|--thumbs) THUMB_MODE="true"; shift ;;
             --)
                 shift
                 ;;
@@ -344,6 +408,105 @@ cmd_search() {
     fi
     _log_debug "Search: Effective background preload setting: $effective_preload_setting"
     _handle_image_selection_loop "$page" "$effective_preload_setting" _api_search_images "${query_args[*]}"
+}
+
+cmd_latest() {
+    local page=1 background_preload_cmd_flag="false"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--page)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then page="$2"; shift 2;
+                else _log_error "Invalid page number for -p/--page: ${2:-}"; return 1; fi ;;
+            -b|--background-preload) background_preload_cmd_flag="true"; shift ;;
+            -t|--thumbs) THUMB_MODE="true"; shift ;;
+            -*) _log_error "Unknown option for latest: $1"; _usage; return 1 ;;
+            *[0-9]*) page="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+    local effective_preload_setting="$CONFIG_SEARCH_BACKGROUND_PRELOAD"
+    [[ "$background_preload_cmd_flag" == "true" ]] && effective_preload_setting="true"
+    _handle_image_selection_loop "$page" "$effective_preload_setting" _api_latest_images
+}
+
+cmd_toplist() {
+    local page=1 background_preload_cmd_flag="false" top_range=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--page)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then page="$2"; shift 2;
+                else _log_error "Invalid page number for -p/--page: ${2:-}"; return 1; fi ;;
+            -r|--range) top_range="$2"; shift 2 ;;
+            -b|--background-preload) background_preload_cmd_flag="true"; shift ;;
+            -t|--thumbs) THUMB_MODE="true"; shift ;;
+            -*) _log_error "Unknown option for toplist: $1"; _usage; return 1 ;;
+            *[0-9]*) page="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+    local effective_preload_setting="$CONFIG_SEARCH_BACKGROUND_PRELOAD"
+    [[ "$background_preload_cmd_flag" == "true" ]] && effective_preload_setting="true"
+    _handle_image_selection_loop "$page" "$effective_preload_setting" _api_toplist_images "${top_range:-$CONFIG_SEARCH_TOPRANGE}"
+}
+
+cmd_random() {
+    local page=1 background_preload_cmd_flag="false" seed=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--page)
+                if [[ -n "${2:-}" && "$2" =~ ^[0-9]+$ ]]; then page="$2"; shift 2;
+                else _log_error "Invalid page number for -p/--page: ${2:-}"; return 1; fi ;;
+            -s|--seed) seed="$2"; shift 2 ;;
+            -b|--background-preload) background_preload_cmd_flag="true"; shift ;;
+            -t|--thumbs) THUMB_MODE="true"; shift ;;
+            -*) _log_error "Unknown option for random: $1"; _usage; return 1 ;;
+            *[0-9]*) page="$1"; shift ;;
+            *) shift ;;
+        esac
+    done
+    local effective_preload_setting="$CONFIG_SEARCH_BACKGROUND_PRELOAD"
+    [[ "$background_preload_cmd_flag" == "true" ]] && effective_preload_setting="true"
+    _handle_image_selection_loop "$page" "$effective_preload_setting" _api_random_images "${seed:-}"
+}
+
+cmd_tags() {
+    local tag_filter="${1:-}"
+    local sort_by="popular"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            popular|viewed|tagged|subs) sort_by="$1"; shift ;;
+            -*) _log_error "Unknown option for tags: $1"; _usage; return 1 ;;
+            *) tag_filter="$1"; shift ;;
+        esac
+    done
+
+    local tags_page_html
+    tags_page_html=$(curl -sL --compressed "https://wallhaven.cc/tags/$sort_by" 2>/dev/null) || { _log_error "Failed to fetch tags page."; return 1; }
+
+    # Extract tag names from title attributes of tag links (macOS-compatible)
+    local tags_list
+    tags_list=$(echo "$tags_page_html" | grep -o 'href="https://wallhaven.cc/tag/[0-9]*"[^>]*title="[^"]*"' | sed 's/.*title="\([^"]*\)".*/\1/')
+
+    if [[ -z "$tags_list" ]]; then
+        _log_error "Could not parse tags from page."
+        return 1
+    fi
+
+    if [[ -n "$tag_filter" ]]; then
+        tags_list=$(echo "$tags_list" | grep -i "$tag_filter")
+        if [[ -z "$tags_list" ]]; then
+            _log_error "No tags matching: $tag_filter"
+            return 1
+        fi
+    fi
+
+    local selected_tag
+    selected_tag=$(echo "$tags_list" | fzf --border --reverse --prompt="Select tag> " --preview="echo \"Search with: walfzf search {}\"") || { _log_error "Tag selection cancelled."; return 1; }
+
+    if [[ -n "$selected_tag" ]]; then
+        echo "Searching for tag: $selected_tag"
+        cmd_search "$selected_tag"
+    fi
 }
 
 cmd_download() {
@@ -412,8 +575,19 @@ cmd_preview() {
         return 1
     fi
 
+    # Split pipe-delimited format: full_url|thumb_url (always present in fzf lines)
+    local full_url="${image_url%%|*}"
+    local thumb_url="${image_url#*|}"
+    [[ "$full_url" == "$thumb_url" ]] && thumb_url="" # No pipe was present
+
+    local preview_url="$full_url"
+    if [[ "${THUMB_MODE:-}" == "true" && -n "$thumb_url" ]]; then
+        preview_url="$thumb_url"
+        _log_debug "Thumb mode: using thumbnail URL: $preview_url"
+    fi
+
     local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
-    local filename; filename=$(basename "$image_url"); filename="${filename%%\?*}"
+    local filename; filename=$(basename "$preview_url"); filename="${filename%%\?*}"
     local temp_image_file="$temp_preview_dir/$filename"
 
     # Always clear the preview pane and show a loading message before any operation
@@ -423,14 +597,14 @@ cmd_preview() {
     sleep 0.03
     
     if [[ ! -f "$temp_image_file" ]]; then
-        _log_debug "Preview: '$filename' not in cache. Downloading from $image_url"
+        _log_debug "Preview: '$filename' not in cache. Downloading from $preview_url"
         
         local spinner_chars=("|" "/" "-" "\\")
         local spin_i=0
         printf "\033[H" # Move cursor to home (1,1) for spinner start
         echo -n "${spinner_chars[$spin_i]} Loading..." # Start spinner with message
         
-        curl -sL --max-time 15 -o "$temp_image_file" "$image_url" &
+        curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url" &
         local curl_pid=$!
 
         while kill -0 $curl_pid 2>/dev/null; do
@@ -446,8 +620,8 @@ cmd_preview() {
 
         if [[ "$curl_exit_code" -ne 0 ]]; then
             # Error message will now appear on the cleared first line
-            echo "Preview Download Error (code $curl_exit_code): $image_url"
-            _log_error "Curl failed ($curl_exit_code) for $image_url"
+            echo "Preview Download Error (code $curl_exit_code): $preview_url"
+            _log_error "Curl failed ($curl_exit_code) for $preview_url"
             rm -f "$temp_image_file" 
             return 1
         fi
@@ -456,6 +630,31 @@ cmd_preview() {
         # Overwrite the loading line if using cached image
         printf "\033[H\033[K"
         _log_debug "Preview: Using cached '$filename' from $temp_image_file"
+    fi
+
+    # Neighbor prefetch: silently fetch next 2 images in background for instant scrolling
+    local url_list_file="$temp_preview_dir/.current_urls.txt"
+    if [[ -f "$url_list_file" ]]; then
+        local prefetch_cfg="$temp_preview_dir/.prefetch.cfg"
+        > "$prefetch_cfg"
+        local prefetch_count=0
+        local found_current=0
+        while IFS= read -r next_url; do
+            if [[ "$found_current" -eq 1 && "$prefetch_count" -lt 2 ]]; then
+                local next_fn; next_fn=$(basename "$next_url"); next_fn="${next_fn%%\?*}"
+                local next_file="$temp_preview_dir/$next_fn"
+                if [[ ! -f "$next_file" ]]; then
+                    printf 'url = "%s"\noutput = "%s"\ncompressed\n\n' "$next_url" "$next_file" >> "$prefetch_cfg"
+                    prefetch_count=$((prefetch_count + 1))
+                fi
+            fi
+            [[ "$next_url" == "$preview_url" ]] && found_current=1
+        done < "$url_list_file"
+        if [[ "$prefetch_count" -gt 0 ]]; then
+            curl --parallel --parallel-max 2 --silent --connect-timeout 10 --config "$prefetch_cfg" &
+            _log_debug "Neighbor prefetch started for $prefetch_count image(s)"
+        fi
+        rm -f "$prefetch_cfg"
     fi
 
     # Check if the cached image is valid and fix if needed
@@ -477,8 +676,8 @@ cmd_preview() {
                 rm -f "$temp_image_file"
                 _cursor_home_and_clear_line
                 echo "Re-downloading corrupted image..."
-                if ! curl -sL --max-time 15 -o "$temp_image_file" "$image_url"; then
-                    echo "Preview: Failed to re-download image. URL: $image_url"
+                if ! curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url"; then
+                    echo "Preview: Failed to re-download image. URL: $preview_url"
                     return 1
                 fi
             fi
@@ -488,8 +687,8 @@ cmd_preview() {
             rm -f "$temp_image_file"
             _cursor_home_and_clear_line
             echo "Re-downloading corrupted image..."
-            if ! curl -sL --max-time 15 -o "$temp_image_file" "$image_url"; then
-                echo "Preview: Failed to re-download image. URL: $image_url"
+            if ! curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url"; then
+                echo "Preview: Failed to re-download image. URL: $preview_url"
                 return 1
             fi
         fi
@@ -499,7 +698,7 @@ cmd_preview() {
 
     # Always ensure the preview pane is clear before attempting to display an image
     _clear_preview_pane_text_content
-    
+
     if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitty &>/dev/null; then
         _log_debug "Attempting Kitty preview for $temp_image_file"
         if kitty icat --clear --silent --align=left --transfer-mode=stream --stdin=no --place="${fzf_cols}x${fzf_lines}@0x0" --scale-up "$temp_image_file"; then
@@ -516,7 +715,7 @@ cmd_preview() {
             # Always ensure the preview pane is clear before attempting Chafa
             _clear_preview_pane_text_content
             
-            if chafa --clear --animate=false "$temp_image_file"; then
+            if chafa --clear --animate=false --size="${fzf_cols}x${fzf_lines}" --stretch --symbols=braille --colors=full --dither=ordered "$temp_image_file"; then
                 return 0
             fi
             _log_debug "Chafa failed for $temp_image_file."
@@ -528,10 +727,48 @@ cmd_preview() {
     fi
     
     _clear_preview_pane_text_content # Final clear for the fallback error message
-    echo "Preview: No suitable previewer or image issue. URL: $image_url (tried cache: $temp_image_file)"
+    echo "Preview: No suitable previewer or image issue. URL: $preview_url (tried cache: $temp_image_file)"
     return 1
 }
 
+
+cmd_setup() {
+    local new_folder=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -f|--folder) new_folder="$2"; shift 2 ;;
+            *) new_folder="$1"; shift ;;
+        esac
+    done
+
+    _load_config
+
+    if [[ -z "$new_folder" ]]; then
+        echo "Current save folder: $CONFIG_SAVE_FOLDER"
+        return 0
+    fi
+
+    # Expand ~ to $HOME
+    new_folder="${new_folder/#\~/$HOME}"
+
+    # Validate the path looks reasonable
+    if [[ "$new_folder" != /* ]]; then
+        _log_error "Folder must be an absolute path (got: $new_folder)"
+        return 1
+    fi
+
+    mkdir -p "$new_folder" || { _log_error "Failed to create directory: $new_folder"; return 1; }
+
+    # Update config file
+    if [[ -f "$CONFIG_FILE" ]]; then
+        sed -i.bak "s|^CONFIG_SAVE_FOLDER=.*|CONFIG_SAVE_FOLDER=\"$new_folder\"|" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+    else
+        echo "CONFIG_SAVE_FOLDER=\"$new_folder\"" >> "$CONFIG_FILE"
+    fi
+
+    CONFIG_SAVE_FOLDER="$new_folder"
+    echo "Save folder set to: $CONFIG_SAVE_FOLDER"
+}
 
 _usage() {
     local script_name; if [[ -n "${BASH_SOURCE[0]}" && -f "${BASH_SOURCE[0]}" ]]; then script_name=$(basename "${BASH_SOURCE[0]}"); else script_name="wallhaven.sh"; fi
@@ -548,6 +785,41 @@ Commands:
       -p <page>, --page <page>        Start search from a specific page number.
       -b, --background-preload        Preload images on the first page for faster previews.
                                       (Overrides config if specified).
+      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+
+  latest (l) [options]
+    Browse latest wallpapers.
+    Options:
+      -p <page>, --page <page>        Start from a specific page number.
+      -b, --background-preload        Preload images before showing fzf.
+      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+
+  toplist (t) [options]
+    Browse top wallpapers.
+    Options:
+      -p <page>, --page <page>        Start from a specific page number.
+      -r <range>, --range <range>     Time range: 1d, 3d, 1w, 1M, 3M, 6M, 1y (default: from config).
+      -b, --background-preload        Preload images before showing fzf.
+      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+
+  random (r) [options]
+    Browse random wallpapers.
+    Options:
+      -p <page>, --page <page>        Start from a specific page number.
+      -s <seed>, --seed <seed>        Seed for reproducible random results.
+      -b, --background-preload        Preload images before showing fzf.
+      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+
+  tags [filter|sort] [options]
+    Browse and select from popular tags on wallhaven.cc.
+    Selecting a tag immediately starts a search for it.
+    Sort options (pick one): popular (default), viewed, tagged, subs
+    Pass any other argument as a text filter (e.g., "anime").
+    Examples:
+      walfzf tags                     # Show all popular tags, pick one
+      walfzf tags anime               # Filter tags matching "anime", pick one
+      walfzf tags viewed              # Sort by most viewed tags
+      walfzf tags subs                # Sort by most subscribed tags
 
   download (d) <image_id...>
     Download specific image(s) by their Wallhaven ID.
@@ -562,6 +834,13 @@ Commands:
   edit (e)
     Open the configuration file in the defined editor.
 
+  setup [folder]
+    Set or view the wallpaper save folder.
+    Examples:
+      walfzf setup                     # Show current folder
+      walfzf setup ~/Pictures/walls    # Set folder (supports ~)
+      walfzf setup --folder /tmp/walls # Same, with explicit flag
+
   help (h), --help, -h
     Show this help message.
 
@@ -575,6 +854,9 @@ EOF
 main() {
     if [[ "${1:-}" == "--is-preview" && "${2:-}" == "--actual-config-path" ]]; then
         local cfg_path_preview="$3"; cfg_path_preview="${cfg_path_preview#\'}"; cfg_path_preview="${cfg_path_preview%\'}" 
+        local preview_thumb_mode="false"
+        shift 3
+        if [[ "${1:-}" == "--thumb-mode" ]]; then preview_thumb_mode="true"; shift; fi
         if [[ -f "$cfg_path_preview" ]]; then 
             # shellcheck source=/dev/null
             source "$cfg_path_preview"; 
@@ -584,20 +866,26 @@ main() {
         fi
         mkdir -p "$CONFIG_TEMP_FOLDER/preview_cache" 
 
-        if [[ "${4:-}" == "preview" ]]; then cmd_preview "${@:5}"; exit $?;
+        if [[ "${1:-}" == "preview" ]]; then THUMB_MODE="$preview_thumb_mode" cmd_preview "${@:2}"; exit $?;
         else echo "walfzf: Error: Preview invocation structure incorrect. Expected 'preview <text_line>'." >&2; exit 1; fi
     fi
 
     _ensure_deps; _load_config; _ensure_dirs 
 
+    THUMB_MODE="false"
     local COMMAND="${1:-help}" 
     [[ $# -gt 0 ]] && shift || true 
     
     case "$COMMAND" in
         search|s) cmd_search "$@" ;;
+        latest|l) cmd_latest "$@" ;;
+        toplist|t) cmd_toplist "$@" ;;
+        random|r) cmd_random "$@" ;;
+        tags) cmd_tags "$@" ;;
         download|d) cmd_download "$@" ;;
         edit|e) cmd_edit "$@" ;;
         collection|c) cmd_collection "$@" ;;
+        setup) cmd_setup "$@" ;;
         help|h|--help|-h) _usage ;;
         *) _log_error "Unknown command: $COMMAND"; _usage; exit 1 ;;
     esac
