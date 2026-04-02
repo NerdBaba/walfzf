@@ -184,4 +184,4 @@ You’ll get extra info in your terminal to help figure things out.
 
 ---
 
-Enjoy your new wallpapers, right from your terminal! 🎉
+Enjoy your new wallpapers, right from your terminal!
