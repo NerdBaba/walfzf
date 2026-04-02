@@ -1,25 +1,20 @@
 # walfzf 🌄
 
-Welcome to **walfzf** — a snappy, interactive Bash tool that lets you search, preview, and download gorgeous wallpapers from [wallhaven.cc](https://wallhaven.cc) right from your terminal. With fuzzy search, in-terminal previews, and a dead-simple config, finding your next wallpaper is actually fun. No more endless browser tabs or cluttered downloads — just type, search, and enjoy!
-
----
+walfzf is a command-line tool for searching, previewing, and downloading wallpapers from [wallhaven.cc](https://wallhaven.cc). It uses [fzf](https://github.com/junegunn/fzf) for interactive selection, supports terminal image previews (via [kitty](https://sw.kovidgoyal.net/kitty/) or [chafa](https://hpjansson.org/chafa/)), and can download wallpapers by ID or from user collections.
 
 ## Demo
 
-
 https://github.com/user-attachments/assets/bd8e222e-5f5c-4e24-99fc-60a989767e10
 
+## Features
 
-
-## Why you'll love it
-
-- 🔍 **Fuzzy search**: Find wallpapers lightning-fast with [fzf](https://github.com/junegunn/fzf).
-- 🖼️ **Instant previews**: See wallpapers in your terminal (works with [kitty](https://sw.kovidgoyal.net/kitty/) or [chafa](https://hpjansson.org/chafa/)).
-- 📥 **One-command downloads**: Grab wallpapers by Wallhaven ID or from collections.
-- 📚 **Browse user collections**: Explore and download from any public Wallhaven collection.
-- ⚙️ **Easy config**: Tweak settings in a simple file (`~/.config/wallhaven-cli/config.sh`).
-- 💡 **Minimal fuss**: Just Bash, curl, jq, fzf, file, and an image previewer.
-- 🛠️ **Debug mode**: For those "what's going on?" moments.
+- Fuzzy search with fzf for quick filtering
+- Terminal image previews (kitty or chafa)
+- Download wallpapers by Wallhaven ID
+- Browse and download from user collections
+- Configurable search parameters (categories, order, resolutions, etc.)
+- Optional background preloading for faster previews
+- Debug mode for troubleshooting
 
 ---
 
@@ -64,41 +59,93 @@ sudo apt install bash curl jq fzf file chafa
 
 ## How to use it
 
-Fire it up with:
+Run walfzf with a command and optional arguments:
+
 ```sh
 ./walfzf [command] [options] [arguments]
 ```
 
-### What can you do?
+### Search Commands
 
-- `search (s) <query> [options]`  
-  Search for wallpapers with fuzzy matching. 
-  - `-p <page>`, `--page <page>`: Start from a specific page
-  - `-b`, `--background-preload`: Preload images for even snappier previews
+- **search (s) `<query>` [options]**  
+  Search wallpapers with fuzzy matching.  
+  Options:  
+  `-p <page>`, `--page <page>` — Start from a specific page  
+  `-b`, `--background-preload` — Preload images for faster previews  
+  `-t`, `--thumbs` — Use low‑resolution thumbnails for preview speed  
 
-- `download (d) <image_id...>`  
-  Download wallpapers by their Wallhaven IDs. Fast and simple.
+- **latest (l) [options]**  
+  Browse the most recently added wallpapers.  
+  Options: same as search (`-p`, `-b`, `-t`).  
 
-- `collection (c) <username> [collection_id] [options]`  
-  Browse and download from anyone’s public collections.
-  - `-p <page>`, `--page <page>`: Start from a specific page
-  - `-a`, `--all`: Download every image in a collection
+- **toplist (t) [options]**  
+  Browse top‑rated wallpapers over a time range.  
+  Options:  
+  `-p <page>`, `--page <page>`  
+  `-r <range>`, `--range <range>` — Time range: 1d, 3d, 1w, 1M, 3M, 6M, 1y (default from config)  
+  `-b`, `--background-preload`  
+  `-t`, `--thumbs`  
 
-- `edit (e)`  
-  Open your config file in your favorite editor.
+- **random (r) [options]**  
+  Browse random wallpapers.  
+  Options:  
+  `-p <page>`, `--page <page>`  
+  `-s <seed>`, `--seed <seed>` — Seed for reproducible random results  
+  `-b`, `--background-preload`  
+  `-t`, `--thumbs`  
 
-- `help (h), --help, -h`  
-  Show this help message.
+### Browse Commands
 
-### Example: Search and Download
+- **tags [filter|sort]**  
+  Browse popular tags on wallhaven.cc. Selecting a tag starts a search.  
+  Sort options (pick one): `popular` (default), `viewed`, `tagged`, `subs`.  
+  Pass any other argument as a text filter (e.g., `walfzf tags anime`).  
+
+- **collection (c) `<username>` [collection_id] [options]**  
+  Browse and download from a user’s public collections. If collection_id is omitted, you’ll be prompted to choose one.  
+  Options:  
+  `-p <page>`, `--page <page>`  
+  `-a`, `--all` — Download all images from the selected collection  
+
+### Download Command
+
+- **download (d) `<image_id...>`**  
+  Download one or more wallpapers by their Wallhaven IDs.  
+
+### Configuration Commands
+
+- **edit (e)**  
+  Open the configuration file in your default editor.  
+
+- **setup [folder]**  
+  View or change the wallpaper save folder.  
+  Examples:  
+  `walfzf setup` — Show current folder  
+  `walfzf setup ~/Pictures/walls` — Set folder (supports `~`)  
+  `walfzf setup --folder /tmp/walls` — Same, with explicit flag  
+
+### Help
+
+- **help (h), --help, -h**  
+  Show the help message.  
+
+### Examples
+
 ```sh
+# Search for mountain wallpapers
 ./walfzf search mountains
-# Use fzf to pick, preview, and grab wallpapers interactively
-```
 
-### Example: Download by ID
-```sh
+# Browse latest wallpapers, page 2
+./walfzf latest -p 2
+
+# Download specific images by ID
 ./walfzf download abc123 def456
+
+# Browse user collections
+./walfzf collection someuser
+
+# Change wallpaper folder
+./walfzf setup ~/Walls
 ```
 
 ---
