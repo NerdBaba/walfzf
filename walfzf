@@ -4,10 +4,10 @@ set -euo pipefail
 # --- Configuration ---
 APP_NAME="walfzf"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/$APP_NAME"
-CONFIG_FILE="$CONFIG_DIR/config.sh" # This global var is critical
+CONFIG_FILE="$CONFIG_DIR/config.sh"
 API_BASE_URL="https://wallhaven.cc/api/v1"
 
-# Default Configuration Values (will be written to config.sh if it doesn't exist)
+# Default Configuration Values
 DEFAULT_EDITOR="nano"
 DEFAULT_SAVE_FOLDER="$HOME/Pictures/wallpapers"
 DEFAULT_TEMP_FOLDER="/tmp/$APP_NAME"
@@ -22,27 +22,63 @@ DEFAULT_SEARCH_ATLEAST=""
 DEFAULT_SEARCH_RESOLUTIONS=""
 DEFAULT_SEARCH_RATIOS=""
 DEFAULT_SEARCH_BACKGROUND_PRELOAD="false"
+DEFAULT_SEARCH_PURITY_SFW="true"
+DEFAULT_SEARCH_PURITY_SKETCHY="true"
+DEFAULT_SEARCH_PURITY_NSFW="false"
+
+# --- Color Support ---
+_COLOR_ENABLED="false"
+if [[ -t 1 ]] && command -v tput >/dev/null 2>&1 && [[ $(tput colors 2>/dev/null) -ge 8 ]]; then
+    _COLOR_ENABLED="true"
+fi
+
+_c() {
+    if [[ "$_COLOR_ENABLED" == "true" ]]; then
+        case "$1" in
+            red)     printf "\033[31m%s\033[0m" "$2" ;;
+            green)   printf "\033[32m%s\033[0m" "$2" ;;
+            yellow)  printf "\033[33m%s\033[0m" "$2" ;;
+            blue)    printf "\033[34m%s\033[0m" "$2" ;;
+            magenta) printf "\033[35m%s\033[0m" "$2" ;;
+            cyan)    printf "\033[36m%s\033[0m" "$2" ;;
+            bold)    printf "\033[1m%s\033[0m" "$2" ;;
+            dim)     printf "\033[2m%s\033[0m" "$2" ;;
+            *)       printf "%s" "$2" ;;
+        esac
+    else
+        printf "%s" "$2"
+    fi
+}
 
 # --- Utility Functions ---
 
 _log_error() {
-    echo "walfzf: Error: $1" >&2
+    echo "$(_c red "walfzf: Error:") $1" >&2
+}
+_log_info() {
+    echo "$(_c cyan "walfzf:") $1" >&2
+}
+_log_success() {
+    echo "$(_c green "walfzf:") $1" >&2
+}
+_log_warn() {
+    echo "$(_c yellow "walfzf: Warning:") $1" >&2
 }
 _log_debug() {
     if [[ -n "${WALLHAVEN_CLI_DEBUG:-}" ]]; then
-        echo "walfzf: DEBUG: $1" >&2
+        echo "$(_c dim "walfzf: DEBUG:") $1" >&2
     fi
 }
 
 _ensure_deps() {
     local missing=0
-    for dep in curl jq fzf file; do # Added 'file' command as a dependency
+    for dep in curl jq fzf file; do
         command -v "$dep" >/dev/null 2>&1 || { _log_error "$dep is not installed. Please install it."; missing=1; }
     done
     if command -v readlink >/dev/null 2>&1 && ! readlink -f . >/dev/null 2>&1; then
-        _log_error "Warning: readlink does not support -f. This might cause issues with preview paths if script is called via symlink."
+        _log_warn "readlink does not support -f. This might cause issues with preview paths if script is called via symlink."
     elif ! command -v readlink >/dev/null 2>&1; then
-         _log_error "Warning: readlink command not found. This might cause issues with preview paths if script is called via symlink."
+         _log_warn "readlink command not found. This might cause issues with preview paths if script is called via symlink."
     fi
     if [[ "$missing" -eq 1 ]]; then
         exit 1
@@ -59,7 +95,9 @@ _ensure_dirs() {
 _load_config() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         mkdir -p "$CONFIG_DIR"
-        echo "# $APP_NAME Configuration File" > "$CONFIG_FILE"
+        cat > "$CONFIG_FILE" <<'CONFEOF'
+# walfzf Configuration File
+CONFEOF
         echo "CONFIG_EDITOR=\"$DEFAULT_EDITOR\"" >> "$CONFIG_FILE"
         echo "CONFIG_SAVE_FOLDER=\"$DEFAULT_SAVE_FOLDER\"" >> "$CONFIG_FILE"
         echo "CONFIG_TEMP_FOLDER=\"$DEFAULT_TEMP_FOLDER\"" >> "$CONFIG_FILE"
@@ -73,8 +111,12 @@ _load_config() {
         echo "CONFIG_SEARCH_ATLEAST=\"$DEFAULT_SEARCH_ATLEAST\"" >> "$CONFIG_FILE"
         echo "CONFIG_SEARCH_RESOLUTIONS=\"$DEFAULT_SEARCH_RESOLUTIONS\" # Comma-separated: \"1920x1080,2560x1440\"" >> "$CONFIG_FILE"
         echo "CONFIG_SEARCH_RATIOS=\"$DEFAULT_SEARCH_RATIOS\"    # Comma-separated: \"16x9,21x9\"" >> "$CONFIG_FILE"
-        echo "CONFIG_SEARCH_BACKGROUND_PRELOAD=\"$DEFAULT_SEARCH_BACKGROUND_PRELOAD\" # Preload images on first page of search for faster previews (true/false)" >> "$CONFIG_FILE"
-        echo "Config file created at $CONFIG_FILE. Please review it."
+        echo "CONFIG_SEARCH_BACKGROUND_PRELOAD=\"$DEFAULT_SEARCH_BACKGROUND_PRELOAD\" # true/false" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_PURITY_SFW=\"$DEFAULT_SEARCH_PURITY_SFW\" # true/false" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_PURITY_SKETCHY=\"$DEFAULT_SEARCH_PURITY_SKETCHY\" # true/false" >> "$CONFIG_FILE"
+        echo "CONFIG_SEARCH_PURITY_NSFW=\"$DEFAULT_SEARCH_PURITY_NSFW\" # true/false (requires API key)" >> "$CONFIG_FILE"
+        echo "CONFIG_API_KEY=\"\" # Optional: your wallhaven.cc API key for nsfw and favorites" >> "$CONFIG_FILE"
+        _log_info "Config file created at $CONFIG_FILE. Please review it."
     fi
     # shellcheck source=/dev/null
     source "$CONFIG_FILE"
@@ -91,6 +133,238 @@ _load_config() {
     CONFIG_SEARCH_RESOLUTIONS="${CONFIG_SEARCH_RESOLUTIONS:-$DEFAULT_SEARCH_RESOLUTIONS}"
     CONFIG_SEARCH_RATIOS="${CONFIG_SEARCH_RATIOS:-$DEFAULT_SEARCH_RATIOS}"
     CONFIG_SEARCH_BACKGROUND_PRELOAD="${CONFIG_SEARCH_BACKGROUND_PRELOAD:-$DEFAULT_SEARCH_BACKGROUND_PRELOAD}"
+    CONFIG_SEARCH_PURITY_SFW="${CONFIG_SEARCH_PURITY_SFW:-$DEFAULT_SEARCH_PURITY_SFW}"
+    CONFIG_SEARCH_PURITY_SKETCHY="${CONFIG_SEARCH_PURITY_SKETCHY:-$DEFAULT_SEARCH_PURITY_SKETCHY}"
+    CONFIG_SEARCH_PURITY_NSFW="${CONFIG_SEARCH_PURITY_NSFW:-$DEFAULT_SEARCH_PURITY_NSFW}"
+    CONFIG_API_KEY="${CONFIG_API_KEY:-}"
+}
+
+# --- History Management ---
+_HISTORY_FILE=""
+_init_history() {
+    _HISTORY_FILE="$CONFIG_DIR/history.jsonl"
+    if [[ ! -f "$_HISTORY_FILE" ]]; then
+        : > "$_HISTORY_FILE"  # Create empty file
+    fi
+}
+
+_history_add() {
+    local id="$1" action="$2" detail="${3:-}"
+    _init_history
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+    # Use jq to safely escape JSON values
+    jq -nc --arg id "$id" --arg action "$action" --arg detail "$detail" --arg ts "$timestamp" \
+        '{id:$id, action:$action, detail:$detail, timestamp:$ts}' >> "$_HISTORY_FILE"
+}
+
+_history_show() {
+    local limit="${1:-20}"
+    _init_history
+    if [[ ! -f "$_HISTORY_FILE" ]]; then
+        _log_info "No history yet."
+        return 0
+    fi
+    # Show last N entries (use tail -r on macOS, tac on Linux)
+    local entries
+    if command -v tac >/dev/null 2>&1; then
+        entries=$(tac "$_HISTORY_FILE" | head -n "$limit" | jq -r '"\(.timestamp) | \(.action) | \(.id) | \(.detail)"' 2>/dev/null)
+    elif command -v tail >/dev/null 2>&1; then
+        entries=$(tail -r "$_HISTORY_FILE" 2>/dev/null | head -n "$limit" | jq -r '"\(.timestamp) | \(.action) | \(.id) | \(.detail)"' 2>/dev/null)
+    else
+        entries=$(jq -r '"\(.timestamp) | \(.action) | \(.id) | \(.detail)"' "$_HISTORY_FILE" 2>/dev/null | tail -n "$limit")
+    fi
+    if [[ -z "$entries" ]]; then
+        _log_info "History is empty."
+        return 0
+    fi
+    echo "$(_c bold 'Recent Activity'):"
+    echo "$entries" | while IFS='|' read -r ts action id detail; do
+        echo "  $(_c dim "$ts") $(_c cyan "$action") $(_c bold "$id") $(_c dim "$detail")"
+    done
+}
+
+_history_clear() {
+    _init_history
+    : > "$_HISTORY_FILE"
+    _log_success "History cleared."
+}
+
+# --- Favorites Management ---
+_FAVORITES_FILE=""
+_init_favorites() {
+    _FAVORITES_FILE="$CONFIG_DIR/favorites.json"
+    if [[ ! -f "$_FAVORITES_FILE" ]]; then
+        echo "[]" > "$_FAVORITES_FILE"
+    fi
+}
+
+_fav_add() {
+    local id="$1"
+    _init_favorites
+    local exists
+    exists=$(jq --arg id "$id" '[.[] | select(.id == $id)] | length' "$_FAVORITES_FILE" 2>/dev/null)
+    if [[ "$exists" -gt 0 ]]; then
+        _log_warn "$(_c bold "$id") is already in favorites."
+        return 0
+    fi
+    local timestamp
+    timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || date +"%Y-%m-%dT%H:%M:%SZ")
+    # Read current, append, write back
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" --arg ts "$timestamp" '. + [{"id": $id, "added_at": $ts}]' "$_FAVORITES_FILE" > "$tmp" && mv "$tmp" "$_FAVORITES_FILE"
+    _log_success "Added $(_c bold "$id") to favorites."
+    _history_add "$id" "favorite" "added to favorites"
+}
+
+_fav_remove() {
+    local id="$1"
+    _init_favorites
+    local exists
+    exists=$(jq --arg id "$id" '[.[] | select(.id == $id)] | length' "$_FAVORITES_FILE" 2>/dev/null)
+    if [[ "$exists" -eq 0 ]]; then
+        _log_warn "$(_c bold "$id") is not in favorites."
+        return 0
+    fi
+    local tmp
+    tmp=$(mktemp)
+    jq --arg id "$id" '[.[] | select(.id != $id)]' "$_FAVORITES_FILE" > "$tmp" && mv "$tmp" "$_FAVORITES_FILE"
+    _log_success "Removed $(_c bold "$id") from favorites."
+}
+
+_fav_list() {
+    _init_favorites
+    local count
+    count=$(jq 'length' "$_FAVORITES_FILE" 2>/dev/null)
+    if [[ "$count" -eq 0 ]]; then
+        _log_info "No favorites saved yet. Press $(_c bold 'F') while browsing to add favorites."
+        return 0
+    fi
+    echo "$(_c bold 'Your Favorites') ($count wallpapers):"
+    jq -r '.[] | "  \(.id)  (added: \(.added_at))"' "$_FAVORITES_FILE" 2>/dev/null
+}
+
+_fav_download_all() {
+    _init_favorites
+    local ids
+    ids=$(jq -r '.[].id' "$_FAVORITES_FILE" 2>/dev/null)
+    if [[ -z "$ids" ]]; then
+        _log_info "No favorites to download."
+        return 0
+    fi
+    local total
+    total=$(echo "$ids" | wc -l | tr -d ' ')
+    _log_info "Downloading $(_c bold "$total") favorite(s)..."
+    local i=0
+    echo "$ids" | while IFS= read -r wid; do
+        i=$((i + 1))
+        _log_info "[$i/$total] Fetching details for $wid..."
+        local image_details
+        image_details=$(_api_get_image_details "$wid") || continue
+        local image_url
+        image_url=$(echo "$image_details" | jq -r '.data.path')
+        if [[ -n "$image_url" && "$image_url" != "null" ]]; then
+            _dl_save "$image_url"
+        else
+            _log_error "Could not find URL for ID: $wid"
+        fi
+    done
+    _log_success "All favorites downloaded."
+}
+
+# --- Wallhaven Info Panel ---
+_show_wallpaper_info() {
+    local image_id="$1"
+    _log_info "Fetching details for $(_c bold "$image_id")..."
+    local response
+    response=$(_api_get_image_details "$image_id") || return 1
+
+    local data
+    data=$(echo "$response" | jq -r '.data')
+
+    local id resolution views favorites likes purity category created_at uploader tags
+    id=$(echo "$data" | jq -r '.id')
+    resolution=$(echo "$data" | jq -r '.resolution // "unknown"')
+    views=$(echo "$data" | jq -r '.views // 0')
+    favorites=$(echo "$data" | jq -r '.favorites // 0')
+    likes=$(echo "$data" | jq -r '.likes // 0')
+    purity=$(echo "$data" | jq -r '.purity // "unknown"')
+    category=$(echo "$data" | jq -r '.category // "unknown"')
+    created_at=$(echo "$data" | jq -r '.created_at // "unknown"')
+    uploader=$(echo "$data" | jq -r '.uploader.name // "anonymous"')
+    local file_size
+    file_size=$(echo "$data" | jq -r '.file_size // 0')
+    local file_size_human
+    if [[ "$file_size" != "null" && "$file_size" -gt 0 ]] 2>/dev/null; then
+        if [[ "$file_size" -gt 1048576 ]]; then
+            file_size_human="$(( file_size / 1048576 )) MB"
+        else
+            file_size_human="$(( file_size / 1024 )) KB"
+        fi
+    else
+        file_size_human="unknown"
+    fi
+
+    # Tags
+    local tags_str
+    tags_str=$(echo "$data" | jq -r '.tags // [] | map(.name) | join(", ")' 2>/dev/null)
+    [[ "$tags_str" == "null" || -z "$tags_str" ]] && tags_str="none"
+
+    echo ""
+    echo "$(_c bold 'Wallpaper Info'):"
+    echo "  $(_c cyan 'ID:')         $id"
+    echo "  $(_c cyan 'Resolution:') $resolution"
+    echo "  $(_c cyan 'File Size:')  $file_size_human"
+    echo "  $(_c cyan 'Category:')   $category"
+    echo "  $(_c cyan 'Purity:')     $purity"
+    echo "  $(_c cyan 'Uploader:')   $uploader"
+    echo "  $(_c cyan 'Created:')    $created_at"
+    echo "  $(_c cyan 'Views:')      $views"
+    echo "  $(_c cyan 'Likes:')      $likes"
+    echo "  $(_c cyan 'Favorites:')  $favorites"
+    echo "  $(_c cyan 'Tags:')       $tags_str"
+    echo ""
+}
+
+# --- Set as Wallpaper (macOS) ---
+_set_wallpaper() {
+    local image_id="$1"
+    _log_info "Fetching wallpaper for $(_c bold "$image_id")..."
+    local response
+    response=$(_api_get_image_details "$image_id") || return 1
+    local image_url
+    image_url=$(echo "$response" | jq -r '.data.path')
+    if [[ -z "$image_url" || "$image_url" == "null" ]]; then
+        _log_error "Could not find URL for ID: $image_id"
+        return 1
+    fi
+
+    # Download to temp
+    local temp_file="${CONFIG_TEMP_FOLDER}/wallpaper_${image_id}"
+    _log_info "Downloading wallpaper..."
+    if ! curl -sL --compressed -o "$temp_file" "$image_url"; then
+        _log_error "Failed to download wallpaper."
+        return 1
+    fi
+
+    # Set as desktop wallpaper (macOS)
+    if [[ "$(uname)" == "Darwin" ]]; then
+        _log_info "Setting as desktop wallpaper..."
+        # Escape quotes and backslashes in path for AppleScript
+        local escaped_path="${temp_file//\\/\\\\}"
+        escaped_path="${escaped_path//\"/\\\"}"
+        if osascript -e "tell application \"Finder\" to set desktop picture to POSIX file \"$escaped_path\""; then
+            _log_success "Desktop wallpaper set to $(_c bold "$image_id")!"
+        else
+            _log_error "Failed to set desktop wallpaper via osascript."
+            return 1
+        fi
+    else
+        _log_error "Set wallpaper is only supported on macOS."
+        _log_info "Wallpaper downloaded to: $temp_file"
+        return 1
+    fi
 }
 
 _urlencode() {
@@ -100,8 +374,14 @@ _urlencode() {
 _make_request() {
     local url="$1"
     _log_debug "Making API request to: $url"
-    response=$(curl -sL "$url")
-    if [[ $? -ne 0 ]]; then
+
+    # Add API key if configured
+    local headers=()
+    if [[ -n "${CONFIG_API_KEY:-}" ]]; then
+        headers+=("-H" "X-API-Key: $CONFIG_API_KEY")
+    fi
+
+    if ! response=$(curl -sL "${headers[@]}" "$url"); then
         _log_error "Failed to make request to $url"
         return 1
     fi
@@ -119,17 +399,17 @@ _dl_save() {
     local folder="${2:-$CONFIG_SAVE_FOLDER}"
     local name
     name=$(basename "$url")
-    name="${name%%\?*}" 
+    name="${name%%\?*}"
     local file_path="${folder}/${name}"
 
     mkdir -p "$folder"
-    echo "walfzf: Downloading $url to $file_path..." >&2
-    if curl -sL --compressed -o "$file_path" "$url"; then
-        echo "walfzf: [download] $name saved to $file_path" >&2
+    _log_info "Downloading $(_c bold "$name")..."
+    if curl -sL --compressed --show-error -o "$file_path" "$url" 2>/dev/null; then
+        _log_success "$(_c bold "$name") saved to $(_c dim "$file_path")"
         return 0
     else
-        _log_error "Failed to download $url to $file_path"
-        rm -f "$file_path" 
+        _log_error "Failed to download $url"
+        rm -f "$file_path"
         return 1
     fi
 }
@@ -137,7 +417,6 @@ _dl_save() {
 _extract_from_parens() {
     echo "$1" | sed -n 's/.*(\([^)]*\)).*/\1/p'
 }
-
 
 _fzf_select() {
     local input="$1"
@@ -147,7 +426,7 @@ _fzf_select() {
 
     if [[ "$allow_multi_select" == "true" ]]; then
         fzf_opts+=("-m" "--bind=enter:accept")
-        fzf_opts+=("--header=TAB/Shift-TAB to select/deselect, Enter to confirm.")
+        fzf_opts+=("--header=$(_c bold 'TAB/Shift-TAB') to select/deselect, $(_c bold 'Enter') to confirm.")
     else
         fzf_opts+=("--bind=enter:accept")
     fi
@@ -163,11 +442,17 @@ _fzf_select() {
         [[ "${THUMB_MODE:-}" == "true" ]] && preview_cmd="$preview_cmd --thumb-mode"
         fzf_opts+=("--preview=$preview_cmd preview {}")
     fi
+
+    # Colorful prompt - use literal ANSI codes to avoid nested quoting issues
+    local colored_prompt
+    colored_prompt=$'\033[1m\033[36mwallhaven\033[0m> '
+    fzf_opts+=("--prompt=$colored_prompt")
+
     _log_debug "Starting fzf with options: ${fzf_opts[*]}"
     selection=$(echo -e "$input" | fzf "${fzf_opts[@]}")
     if [[ -z "$selection" ]]; then
         _log_debug "fzf selection cancelled or empty."
-        return 1 
+        return 1
     fi
     _log_debug "fzf selection made."
     echo "$selection"
@@ -178,7 +463,9 @@ _api_search_images() {
     local query="$1"; local page="$2"; local params="q=$(_urlencode "$query")&page=$page"
     local c_g=0 c_a=0 c_p=0
     [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
-    params="$params&categories=${c_g}${c_a}${c_p}&order=$(_urlencode "$CONFIG_SEARCH_ORDER")&topRange=$(_urlencode "$CONFIG_SEARCH_TOPRANGE")"
+    local pur_s=0 pur_k=0 pur_n=0
+    [[ "$CONFIG_SEARCH_PURITY_SFW" == "true" ]] && pur_s=1; [[ "$CONFIG_SEARCH_PURITY_SKETCHY" == "true" ]] && pur_k=1; [[ "$CONFIG_SEARCH_PURITY_NSFW" == "true" ]] && pur_n=1
+    params="$params&categories=${c_g}${c_a}${c_p}&purity=${pur_s}${pur_k}${pur_n}&order=$(_urlencode "$CONFIG_SEARCH_ORDER")&topRange=$(_urlencode "$CONFIG_SEARCH_TOPRANGE")"
     [[ -n "$CONFIG_SEARCH_ATLEAST" ]] && params="$params&atleast=$(_urlencode "$CONFIG_SEARCH_ATLEAST")"
     [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
     [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
@@ -188,7 +475,9 @@ _api_latest_images() {
     local page="$1"; local params="sorting=date_added&page=$page"
     local c_g=0 c_a=0 c_p=0
     [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
-    params="$params&categories=${c_g}${c_a}${c_p}"
+    local pur_s=0 pur_k=0 pur_n=0
+    [[ "$CONFIG_SEARCH_PURITY_SFW" == "true" ]] && pur_s=1; [[ "$CONFIG_SEARCH_PURITY_SKETCHY" == "true" ]] && pur_k=1; [[ "$CONFIG_SEARCH_PURITY_NSFW" == "true" ]] && pur_n=1
+    params="$params&categories=${c_g}${c_a}${c_p}&purity=${pur_s}${pur_k}${pur_n}"
     [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
     [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
     _make_request "$API_BASE_URL/search?$params"
@@ -198,7 +487,9 @@ _api_toplist_images() {
     local params="sorting=toplist&topRange=$(_urlencode "$top_range")&page=$page"
     local c_g=0 c_a=0 c_p=0
     [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
-    params="$params&categories=${c_g}${c_a}${c_p}"
+    local pur_s=0 pur_k=0 pur_n=0
+    [[ "$CONFIG_SEARCH_PURITY_SFW" == "true" ]] && pur_s=1; [[ "$CONFIG_SEARCH_PURITY_SKETCHY" == "true" ]] && pur_k=1; [[ "$CONFIG_SEARCH_PURITY_NSFW" == "true" ]] && pur_n=1
+    params="$params&categories=${c_g}${c_a}${c_p}&purity=${pur_s}${pur_k}${pur_n}"
     [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
     [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
     _make_request "$API_BASE_URL/search?$params"
@@ -208,7 +499,9 @@ _api_random_images() {
     [[ -n "$seed" ]] && params="$params&seed=$(_urlencode "$seed")"
     local c_g=0 c_a=0 c_p=0
     [[ "$CONFIG_SEARCH_CATEGORIES_GENERAL" == "true" ]] && c_g=1; [[ "$CONFIG_SEARCH_CATEGORIES_ANIME" == "true" ]] && c_a=1; [[ "$CONFIG_SEARCH_CATEGORIES_PEOPLE" == "true" ]] && c_p=1
-    params="$params&categories=${c_g}${c_a}${c_p}"
+    local pur_s=0 pur_k=0 pur_n=0
+    [[ "$CONFIG_SEARCH_PURITY_SFW" == "true" ]] && pur_s=1; [[ "$CONFIG_SEARCH_PURITY_SKETCHY" == "true" ]] && pur_k=1; [[ "$CONFIG_SEARCH_PURITY_NSFW" == "true" ]] && pur_n=1
+    params="$params&categories=${c_g}${c_a}${c_p}&purity=${pur_s}${pur_k}${pur_n}"
     [[ -n "$CONFIG_SEARCH_RESOLUTIONS" ]] && params="$params&resolutions=$(_urlencode "$CONFIG_SEARCH_RESOLUTIONS")"
     [[ -n "$CONFIG_SEARCH_RATIOS" ]] && params="$params&ratios=$(_urlencode "$CONFIG_SEARCH_RATIOS")"
     _make_request "$API_BASE_URL/search?$params"
@@ -219,16 +512,16 @@ _api_get_collection_images() { _make_request "$API_BASE_URL/collections/$(_urlen
 
 _handle_image_selection_loop() {
     local current_page="$1"
-    local background_preload_active="$2" 
-    shift 2 
+    local background_preload_active="$2"
+    shift 2
     local api_call_prefix=("$@")
 
     while true; do
-        echo "walfzf: Fetching page $current_page..." >&2
+        _log_info "Fetching page $(_c bold "$current_page")..."
         local images_response; images_response=$("${api_call_prefix[@]}" "$current_page") || return 1
 
         if [[ "$background_preload_active" == "true" ]]; then
-            echo "walfzf: Preloading all images for page $current_page..." >&2
+            _log_info "Preloading all images for page $current_page..."
             local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
             local url_list_file="$temp_preview_dir/.current_urls.txt"
             local preload_urls
@@ -259,20 +552,20 @@ _handle_image_selection_loop() {
                 done
 
                 if [[ "$uncached" -gt 0 ]]; then
-                    printf "Preloading %d/%d images...\r" "$uncached" "$total" >&2
+                    printf "$(_c dim 'Preloading') %d/%d images...\r" "$uncached" "$total" >&2
                     if curl --parallel --parallel-max 8 --compressed --silent \
                         --connect-timeout 10 --config "$parallel_config" 2>/dev/null; then
-                        printf "Preloaded %d/%d images.         \n" "$uncached" "$total" >&2
+                        printf "$(_c green 'Preloaded') %d/%d images.         \n" "$uncached" "$total" >&2
                     else
-                        printf "Preload finished with errors.   \n" >&2
+                        printf "$(_c yellow 'Preload finished with errors.')   \n" >&2
                     fi
                 else
-                    echo "All $total images already cached." >&2
+                    echo "$(_c green "All $total images already cached.")" >&2
                 fi
                 rm -f "$parallel_config"
             fi
         else
-            # Lazy preload: write URL list for neighbor prefetch and start bg download
+            # Lazy preload
             local temp_preview_dir="$CONFIG_TEMP_FOLDER/preview_cache"
             local url_list_file="$temp_preview_dir/.current_urls.txt"
             local preload_urls
@@ -300,7 +593,7 @@ _handle_image_selection_loop() {
                 if [[ "$uncached" -gt 0 ]]; then
                     curl --parallel --parallel-max 4 --compressed --silent \
                         --connect-timeout 10 --config "$parallel_config" 2>/dev/null &
-                    echo "walfzf: Preloading $uncached image(s) in background..." >&2
+                    _log_info "Preloading $uncached image(s) in background..."
                 fi
                 rm -f "$parallel_config"
             fi
@@ -308,23 +601,23 @@ _handle_image_selection_loop() {
 
         local images_data=$(echo "$images_response" | jq -r '.data')
         if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 && "$current_page" -eq 1 ]]; then _log_error "No images found."; return 1; fi
-        if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then _log_error "No images on this page."; fi
+        if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then _log_warn "No images on this page."; fi
 
         local fzf_input=""; local last_page
-        last_page=$(echo "$images_response" | jq -r '.meta.last_page // 1') 
+        last_page=$(echo "$images_response" | jq -r '.meta.last_page // 1')
         if [[ "$current_page" -lt "$last_page" ]]; then fzf_input+="Next page -->\n"; fi
         if [[ "$current_page" -gt 1 ]]; then fzf_input+="Previous page <--\n"; fi
         if [[ "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -gt 0 ]]; then
             fzf_input+=$(echo "$images_data" | jq -r '.[] | "\(.id) \(.resolution) (\(.path)|\(.thumbs.large // .path))"')
         fi
-        
+
         if [[ -z "$fzf_input" && "$(echo "$images_data" | jq 'if type=="array" then length else 0 end')" -eq 0 ]]; then
             _log_error "No items to display (no images, no pagination options)."
-            if [[ "$current_page" -gt 1 ]]; then _log_error "Auto-returning to previous page."; current_page=$((current_page - 1)); continue; fi
+            if [[ "$current_page" -gt 1 ]]; then _log_info "Auto-returning to previous page."; current_page=$((current_page - 1)); continue; fi
             return 1
         fi
-        
-        local selections; selections=$(_fzf_select "$fzf_input" "true" "true") || { _log_error "Selection cancelled by user."; return 1; }
+
+        local selections; selections=$(_fzf_select "$fzf_input" "true" "true") || { _log_info "Selection cancelled by user."; return 1; }
         _log_debug "fzf returned selections: <<<${selections}>>>"
 
         local paginate_action=""; local urls_to_download=()
@@ -332,14 +625,14 @@ _handle_image_selection_loop() {
         while IFS= read -r selection_line; do
             if [[ -z "$selection_line" ]]; then _log_debug "Skipping empty selection line."; continue; fi
             _log_debug "Processing selection line: [${selection_line}]"
-            if echo "$selection_line" | grep -qE -- "(Next page -->|-->$)"; then 
+            if echo "$selection_line" | grep -qE -- "(Next page -->|-->$)"; then
                 if [[ -z "$paginate_action" ]]; then paginate_action="next"; _log_debug "Pagination action set to NEXT."; fi
-            elif echo "$selection_line" | grep -qE -- "(Previous page <--|<--$)"; then 
+            elif echo "$selection_line" | grep -qE -- "(Previous page <--|<--$)"; then
                 if [[ -z "$paginate_action" ]]; then paginate_action="prev"; _log_debug "Pagination action set to PREV."; fi
             else
                 _log_debug "Attempting to treat as image line: [${selection_line}]"
                 local url_from_line=$(_extract_from_parens "$selection_line")
-                url_from_line="${url_from_line%%|*}" # Use full URL (before pipe) for download
+                url_from_line="${url_from_line%%|*}"
                 _log_debug "Extracted URL: [${url_from_line}]"
                 if [[ -n "$url_from_line" ]]; then
                     urls_to_download+=("$url_from_line")
@@ -354,16 +647,23 @@ _handle_image_selection_loop() {
         _log_debug "paginate_action: [${paginate_action}]"
 
         if [[ ${#urls_to_download[@]} -gt 0 ]]; then
-            echo "walfzf: Preparing to download ${#urls_to_download[@]} image(s)..." >&2
-            for dl_url in "${urls_to_download[@]}"; do _dl_save "$dl_url"; done
-            return 0 
+            _log_info "Preparing to download $(_c bold "${#urls_to_download[@]}") image(s)..."
+            for dl_url in "${urls_to_download[@]}"; do
+                _dl_save "$dl_url"
+                # Record in history
+                local dl_id
+                dl_id=$(basename "$dl_url")
+                dl_id="${dl_id%%\?*}"
+                _history_add "$dl_id" "download" "saved to $CONFIG_SAVE_FOLDER"
+            done
+            return 0
         elif [[ -n "$paginate_action" ]]; then
             if [[ "$paginate_action" == "next" ]]; then current_page=$((current_page + 1));
             elif [[ "$paginate_action" == "prev" ]]; then current_page=$((current_page - 1));
             fi
         else
-            _log_error "No valid selection made (no downloads, no pagination after processing fzf output)."
-            return 1 
+            _log_error "No valid selection made."
+            return 1
         fi
     done
 }
@@ -383,9 +683,7 @@ cmd_search() {
                 background_preload_cmd_flag="true"
                 shift ;;
             -t|--thumbs) THUMB_MODE="true"; shift ;;
-            --)
-                shift
-                ;;
+            --) shift ;;
             -*) _log_error "Unknown option for search: $1"; _usage; return 1 ;;
             *)
                 if [[ $found_query -eq 0 ]]; then
@@ -393,7 +691,7 @@ cmd_search() {
                     found_query=1
                     shift
                 else
-                    _log_error "Too many arguments for search. Only one query string is allowed."; _usage; return 1
+                    _log_error "Too many arguments for search."; _usage; return 1
                 fi
                 ;;
         esac
@@ -406,7 +704,6 @@ cmd_search() {
         effective_preload_setting="true"
         _log_debug "Search: Background preload overridden by command line flag."
     fi
-    _log_debug "Search: Effective background preload setting: $effective_preload_setting"
     _handle_image_selection_loop "$page" "$effective_preload_setting" _api_search_images "${query_args[*]}"
 }
 
@@ -483,7 +780,6 @@ cmd_tags() {
     local tags_page_html
     tags_page_html=$(curl -sL --compressed "https://wallhaven.cc/tags/$sort_by" 2>/dev/null) || { _log_error "Failed to fetch tags page."; return 1; }
 
-    # Extract tag names from title attributes of tag links (macOS-compatible)
     local tags_list
     tags_list=$(echo "$tags_page_html" | grep -o 'href="https://wallhaven.cc/tag/[0-9]*"[^>]*title="[^"]*"' | sed 's/.*title="\([^"]*\)".*/\1/')
 
@@ -493,7 +789,7 @@ cmd_tags() {
     fi
 
     if [[ -n "$tag_filter" ]]; then
-        tags_list=$(echo "$tags_list" | grep -i "$tag_filter")
+        tags_list=$(echo "$tags_list" | grep -Fi -- "$tag_filter")
         if [[ -z "$tags_list" ]]; then
             _log_error "No tags matching: $tag_filter"
             return 1
@@ -501,10 +797,12 @@ cmd_tags() {
     fi
 
     local selected_tag
-    selected_tag=$(echo "$tags_list" | fzf --border --reverse --prompt="Select tag> " --preview="echo \"Search with: walfzf search {}\"") || { _log_error "Tag selection cancelled."; return 1; }
+    local tags_prompt
+    tags_prompt=$'\033[1m\033[36mtags\033[0m> '
+    selected_tag=$(echo "$tags_list" | fzf --border --reverse --prompt="$tags_prompt" --preview="echo 'Search with: walfzf search {}'") || { _log_info "Tag selection cancelled."; return 1; }
 
     if [[ -n "$selected_tag" ]]; then
-        echo "Searching for tag: $selected_tag"
+        _log_info "Searching for tag: $(_c bold "$selected_tag")"
         cmd_search "$selected_tag"
     fi
 }
@@ -512,50 +810,77 @@ cmd_tags() {
 cmd_download() {
     if [[ $# -eq 0 ]]; then _log_error "Image ID(s) required."; _usage; return 1; fi
     for image_id in "$@"; do
-        echo "walfzf: Fetching details for ID: $image_id..." >&2
-        local image_details=$(_api_get_image_details "$image_id") || continue 
+        _log_info "Fetching details for $(_c bold "$image_id")..."
+        local image_details=$(_api_get_image_details "$image_id") || continue
         local image_url=$(echo "$image_details" | jq -r '.data.path')
         if [[ -z "$image_url" || "$image_url" == "null" ]]; then _log_error "Could not find URL for ID: $image_id"; continue; fi
         _dl_save "$image_url"
+        _history_add "$image_id" "download" "downloaded by ID"
     done
 }
-cmd_edit() { if [[ -n "$CONFIG_EDITOR" ]]; then "$CONFIG_EDITOR" "$CONFIG_FILE"; else _log_error "Editor not configured."; return 1; fi; }
+
+cmd_edit() {
+    if [[ -n "$CONFIG_EDITOR" ]]; then
+        "$CONFIG_EDITOR" "$CONFIG_FILE"
+    else
+        _log_error "Editor not configured."
+        return 1
+    fi
+}
+
 cmd_collection() {
-    local page=1 download_all=0 username="" collection_id_arg="" pos_args=(); while [[ $# -gt 0 ]]; do case "$1" in -p|--page) page="$2"; shift 2;; -a|--all) download_all=1; shift;; --) shift; pos_args+=("$@");break;; *) pos_args+=("$1");shift;; esac; done
+    local page=1 download_all=0 username="" collection_id_arg="" pos_args=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -p|--page) page="$2"; shift 2;;
+            -a|--all) download_all=1; shift;;
+            --) shift; pos_args+=("$@"); break;;
+            *) pos_args+=("$1"); shift;;
+        esac
+    done
     if [[ ${#pos_args[@]} -eq 0 ]]; then _log_error "Username required."; _usage; return 1; fi
     username="${pos_args[0]}"; [[ ${#pos_args[@]} -gt 1 ]] && collection_id_arg="${pos_args[1]}"; local collection_id="$collection_id_arg"
     if [[ -z "$collection_id" ]]; then
-        echo "walfzf: Fetching collections for user: $username..." >&2
+        _log_info "Fetching collections for user: $(_c bold "$username")..."
         local collections_response=$(_api_list_user_collections "$username") || return 1
         if [[ "$(echo "$collections_response" | jq -r '.data | length')" -eq 0 ]]; then _log_error "No collections or user not found."; return 1; fi
         local fzf_collections_input=$(echo "$collections_response" | jq -r '.data[] | "\(.label) (\(.id))"')
-        local selected_collection_str=$(_fzf_select "$fzf_collections_input" "false" "false") || { _log_error "No collection selected."; return 1; }
+        local selected_collection_str=$(_fzf_select "$fzf_collections_input" "false" "false") || { _log_info "No collection selected."; return 1; }
         collection_id=$(_extract_from_parens "$selected_collection_str"); if [[ -z "$collection_id" ]]; then _log_error "Could not extract ID from: $selected_collection_str"; return 1; fi
-    fi; echo "walfzf: Selected collection ID: $collection_id" >&2
+    fi
+    _log_info "Selected collection ID: $(_c bold "$collection_id")"
     if [[ "$download_all" -eq 1 ]]; then
-        echo "walfzf: Downloading all from collection $collection_id for $username..." >&2; local current_page=1
-        while true; do echo "walfzf: Fetching page $current_page..." >&2; local images_response=$(_api_get_collection_images "$username" "$collection_id" "$current_page") || break
-            local images_in_page=$(echo "$images_response" | jq -r '.data[] | .path'); if [[ -z "$images_in_page" ]]; then echo "No more images." >&2; break; fi
+        _log_info "Downloading all from collection $collection_id for $username..."
+        local current_page=1
+        while true; do
+            _log_info "Fetching page $current_page..."
+            local images_response=$(_api_get_collection_images "$username" "$collection_id" "$current_page") || break
+            local images_in_page=$(echo "$images_response" | jq -r '.data[] | .path')
+            if [[ -z "$images_in_page" ]]; then _log_info "No more images."; break; fi
             echo "$images_in_page" | while IFS= read -r image_url; do _dl_save "$image_url"; done
-            if [[ "$current_page" -ge "$(echo "$images_response" | jq -r '.meta.last_page')" ]]; then echo "Last page reached." >&2; break; fi; current_page=$((current_page + 1))
-        done; echo "walfzf: Finished downloading all." >&2
-    else _handle_image_selection_loop "$page" "false" _api_get_collection_images "$username" "$collection_id"; fi
+            if [[ "$current_page" -ge "$(echo "$images_response" | jq -r '.meta.last_page')" ]]; then _log_info "Last page reached."; break; fi
+            current_page=$((current_page + 1))
+        done
+        _log_success "Finished downloading all."
+    else
+        _handle_image_selection_loop "$page" "false" _api_get_collection_images "$username" "$collection_id"
+    fi
 }
 
 cmd_preview() {
     local text_line="$1"
 
-    _clear_preview_pane_text_content() { # Clears entire preview pane
+    _clear_preview_pane_text_content() {
         if command -v tput >/dev/null && [ -t 1 ]; then tput clear;
         elif [ -t 1 ]; then printf "\033c"; fi
     }
-    _cursor_home_and_clear_line() { # Moves cursor to home (1,1) and clears that line
-         printf "\033[H\033[K" # \033[H: Cursor to Home (1,1), \033[K: Erase to end of line
+    _cursor_home_and_clear_line() {
+         printf "\033[H\033[K"
     }
 
-    local success_messages=("Preview loaded!" "Image ready." "Displayed." "Voilà!" "Rendered.")
+    local success_messages=("Preview loaded!" "Image ready." "Displayed." "Voila!" "Rendered.")
     _print_kitty_success_text_on_first_line() {
-        _cursor_home_and_clear_line # This handles clearing what was on the first line (e.g. spinner)
+        _cursor_home_and_clear_line
         local r_idx=$((RANDOM % ${#success_messages[@]})); echo "${success_messages[$r_idx]}"
     }
 
@@ -566,19 +891,17 @@ cmd_preview() {
     fi
 
     local image_url
-    if grep -oP '\(\K[^)]+' <<< "$text_line" &>/dev/null; then image_url=$(grep -oP '\(\K[^)]+' <<< "$text_line");
-    else image_url=$(_extract_from_parens "$text_line"); fi
+    image_url=$(_extract_from_parens "$text_line")
 
     if [[ -z "$image_url" ]]; then
-        _clear_preview_pane_text_content 
+        _clear_preview_pane_text_content
         echo "Preview Error: Could not extract URL from: $text_line"
         return 1
     fi
 
-    # Split pipe-delimited format: full_url|thumb_url (always present in fzf lines)
     local full_url="${image_url%%|*}"
     local thumb_url="${image_url#*|}"
-    [[ "$full_url" == "$thumb_url" ]] && thumb_url="" # No pipe was present
+    [[ "$full_url" == "$thumb_url" ]] && thumb_url=""
 
     local preview_url="$full_url"
     if [[ "${THUMB_MODE:-}" == "true" && -n "$thumb_url" ]]; then
@@ -590,49 +913,44 @@ cmd_preview() {
     local filename; filename=$(basename "$preview_url"); filename="${filename%%\?*}"
     local temp_image_file="$temp_preview_dir/$filename"
 
-    # Always clear the preview pane and show a loading message before any operation
     _clear_preview_pane_text_content
-    printf "[Previewing...]\n"
-    # Flush output to ensure the user sees the blank/loading state immediately
+    printf "$(_c dim '[Previewing...]')\n"
     sleep 0.03
-    
+
     if [[ ! -f "$temp_image_file" ]]; then
         _log_debug "Preview: '$filename' not in cache. Downloading from $preview_url"
-        
+
         local spinner_chars=("|" "/" "-" "\\")
         local spin_i=0
-        printf "\033[H" # Move cursor to home (1,1) for spinner start
-        echo -n "${spinner_chars[$spin_i]} Loading..." # Start spinner with message
-        
+        printf "\033[H"
+        echo -ne "${spinner_chars[$spin_i]} $(_c cyan 'Loading...')"
+
         curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url" &
         local curl_pid=$!
 
         while kill -0 $curl_pid 2>/dev/null; do
             spin_i=$(((spin_i + 1) % 4))
-            echo -ne "\033[H${spinner_chars[$spin_i]} Loading..." # Update spinner at home position
+            echo -ne "\033[H${spinner_chars[$spin_i]} $(_c cyan 'Loading...')"
             sleep 0.1
         done
         wait $curl_pid
         local curl_exit_code=$?
-        
-        # Overwrite the loading line after download attempt
+
         printf "\033[H\033[K"
 
         if [[ "$curl_exit_code" -ne 0 ]]; then
-            # Error message will now appear on the cleared first line
-            echo "Preview Download Error (code $curl_exit_code): $preview_url"
+            echo "$(_c yellow "Preview Download Error") (code $curl_exit_code): $preview_url"
             _log_error "Curl failed ($curl_exit_code) for $preview_url"
-            rm -f "$temp_image_file" 
+            rm -f "$temp_image_file"
             return 1
         fi
         _log_debug "Preview: '$filename' downloaded to $temp_image_file"
     else
-        # Overwrite the loading line if using cached image
         printf "\033[H\033[K"
         _log_debug "Preview: Using cached '$filename' from $temp_image_file"
     fi
 
-    # Neighbor prefetch: silently fetch next 2 images in background for instant scrolling
+    # Neighbor prefetch
     local url_list_file="$temp_preview_dir/.current_urls.txt"
     if [[ -f "$url_list_file" ]]; then
         local prefetch_cfg="$temp_preview_dir/.prefetch.cfg"
@@ -657,46 +975,24 @@ cmd_preview() {
         rm -f "$prefetch_cfg"
     fi
 
-    # Check if the cached image is valid and fix if needed
+    # Validate image file
     local file_type
     file_type=$(file -b "$temp_image_file" 2>/dev/null || echo "unknown")
     _log_debug "File details for $temp_image_file: $file_type"
-    
-    # If the file is not a valid image or has issues, try to fix it with convert
+
     if ! echo "$file_type" | grep -qi "image"; then
-        _log_debug "Invalid image detected: $temp_image_file. Attempting to fix or re-download."
-        if command -v convert &>/dev/null; then
-            _log_debug "Attempting to fix image with ImageMagick"
-            local temp_fixed_file="${temp_image_file}.fixed"
-            if convert "$temp_image_file" -auto-orient "$temp_fixed_file" 2>/dev/null; then
-                mv "$temp_fixed_file" "$temp_image_file"
-                _log_debug "Image fixed successfully"
-            else
-                _log_debug "ImageMagick conversion failed, re-downloading image"
-                rm -f "$temp_image_file"
-                _cursor_home_and_clear_line
-                echo "Re-downloading corrupted image..."
-                if ! curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url"; then
-                    echo "Preview: Failed to re-download image. URL: $preview_url"
-                    return 1
-                fi
-            fi
-        else
-            # If convert is not available, just re-download
-            _log_debug "ImageMagick not available, re-downloading image"
-            rm -f "$temp_image_file"
-            _cursor_home_and_clear_line
-            echo "Re-downloading corrupted image..."
-            if ! curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url"; then
-                echo "Preview: Failed to re-download image. URL: $preview_url"
-                return 1
-            fi
+        _log_debug "Invalid image detected. Re-downloading."
+        rm -f "$temp_image_file"
+        _cursor_home_and_clear_line
+        echo "$(_c yellow 'Re-downloading corrupted image...')"
+        if ! curl -sL --compressed --max-time 15 -o "$temp_image_file" "$preview_url"; then
+            echo "$(_c red 'Preview: Failed to re-download image.')"
+            return 1
         fi
     fi
 
     local fzf_cols="${FZF_PREVIEW_COLUMNS:-80}"; local fzf_lines="${FZF_PREVIEW_LINES:-24}"
 
-    # Always ensure the preview pane is clear before attempting to display an image
     _clear_preview_pane_text_content
 
     if [[ -n "${KITTY_WINDOW_ID:-}" ]] && command -v kitty &>/dev/null; then
@@ -705,32 +1001,29 @@ cmd_preview() {
             _print_kitty_success_text_on_first_line
             return 0
         fi
-        _log_debug "Kitty icat failed for $temp_image_file. Trying Chafa."
-        _clear_preview_pane_text_content # Clear any Kitty remnants before Chafa
+        _log_debug "Kitty icat failed. Trying Chafa."
+        _clear_preview_pane_text_content
     fi
 
     if command -v chafa &>/dev/null; then
         _log_debug "Attempting Chafa preview for $temp_image_file"
-        if [[ -f "$temp_image_file" ]]; then 
-            # Always ensure the preview pane is clear before attempting Chafa
+        if [[ -f "$temp_image_file" ]]; then
             _clear_preview_pane_text_content
-            
             if chafa --clear --animate=false --size="${fzf_cols}x${fzf_lines}" --stretch --symbols=braille --colors=full --dither=ordered "$temp_image_file"; then
                 return 0
             fi
-            _log_debug "Chafa failed for $temp_image_file."
-            _clear_preview_pane_text_content # Clear any Chafa remnants
+            _log_debug "Chafa failed."
+            _clear_preview_pane_text_content
         else
-             _log_debug "Cached file $temp_image_file seems to have disappeared before Chafa could use it."
-             _clear_preview_pane_text_content # Ensure pane is clear
+             _log_debug "Cached file disappeared before Chafa."
+             _clear_preview_pane_text_content
         fi
     fi
-    
-    _clear_preview_pane_text_content # Final clear for the fallback error message
-    echo "Preview: No suitable previewer or image issue. URL: $preview_url (tried cache: $temp_image_file)"
+
+    _clear_preview_pane_text_content
+    echo "$(_c yellow 'Preview: No suitable previewer or image issue.') URL: $preview_url"
     return 1
 }
-
 
 cmd_setup() {
     local new_folder=""
@@ -744,14 +1037,12 @@ cmd_setup() {
     _load_config
 
     if [[ -z "$new_folder" ]]; then
-        echo "Current save folder: $CONFIG_SAVE_FOLDER"
+        echo "Current save folder: $(_c bold "$CONFIG_SAVE_FOLDER")"
         return 0
     fi
 
-    # Expand ~ to $HOME
     new_folder="${new_folder/#\~/$HOME}"
 
-    # Validate the path looks reasonable
     if [[ "$new_folder" != /* ]]; then
         _log_error "Folder must be an absolute path (got: $new_folder)"
         return 1
@@ -759,7 +1050,6 @@ cmd_setup() {
 
     mkdir -p "$new_folder" || { _log_error "Failed to create directory: $new_folder"; return 1; }
 
-    # Update config file
     if [[ -f "$CONFIG_FILE" ]]; then
         sed -i.bak "s|^CONFIG_SAVE_FOLDER=.*|CONFIG_SAVE_FOLDER=\"$new_folder\"|" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
     else
@@ -767,115 +1057,172 @@ cmd_setup() {
     fi
 
     CONFIG_SAVE_FOLDER="$new_folder"
-    echo "Save folder set to: $CONFIG_SAVE_FOLDER"
+    _log_success "Save folder set to: $(_c bold "$CONFIG_SAVE_FOLDER")"
+}
+
+# --- Interactive Setup Wizard ---
+cmd_wizard() {
+    echo ""
+    echo "$(_c bold 'Welcome to walfzf Setup Wizard!')"
+    echo "$(_c dim 'Press Ctrl+C to cancel at any time.')"
+    echo ""
+
+    _load_config
+
+    # Save folder
+    echo "$(_c cyan '1. Wallpaper Save Folder')"
+    echo "   Current: $(_c bold "$CONFIG_SAVE_FOLDER")"
+    read -rp "   New path (press Enter to keep current): " wizard_folder
+    if [[ -n "$wizard_folder" ]]; then
+        wizard_folder="${wizard_folder/#\~/$HOME}"
+        mkdir -p "$wizard_folder" || { _log_error "Cannot create: $wizard_folder"; return 1; }
+        sed -i.bak "s|^CONFIG_SAVE_FOLDER=.*|CONFIG_SAVE_FOLDER=\"$wizard_folder\"|" "$CONFIG_FILE" && rm -f "${CONFIG_FILE}.bak"
+        CONFIG_SAVE_FOLDER="$wizard_folder"
+        _log_success "Save folder: $CONFIG_SAVE_FOLDER"
+    fi
+    echo ""
+
+    # Categories
+    echo "$(_c cyan '2. Search Categories')"
+    echo "   Current: General=$CONFIG_SEARCH_CATEGORIES_GENERAL, Anime=$CONFIG_SEARCH_CATEGORIES_ANIME, People=$CONFIG_SEARCH_CATEGORIES_PEOPLE"
+    read -rp "   Include general? (y/n) [y]: " wizard_cat_g
+    read -rp "   Include anime? (y/n) [y]: " wizard_cat_a
+    read -rp "   Include people? (y/n) [y]: " wizard_cat_p
+    if [[ "${wizard_cat_g:-y}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_GENERAL=.*|CONFIG_SEARCH_CATEGORIES_GENERAL="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_GENERAL=.*|CONFIG_SEARCH_CATEGORIES_GENERAL="false"|' "$CONFIG_FILE"
+    fi
+    if [[ "${wizard_cat_a:-y}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_ANIME=.*|CONFIG_SEARCH_CATEGORIES_ANIME="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_ANIME=.*|CONFIG_SEARCH_CATEGORIES_ANIME="false"|' "$CONFIG_FILE"
+    fi
+    if [[ "${wizard_cat_p:-y}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_PEOPLE=.*|CONFIG_SEARCH_CATEGORIES_PEOPLE="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_CATEGORIES_PEOPLE=.*|CONFIG_SEARCH_CATEGORIES_PEOPLE="false"|' "$CONFIG_FILE"
+    fi
+    rm -f "${CONFIG_FILE}.bak"
+    echo ""
+
+    # Purity
+    echo "$(_c cyan '3. Content Purity Filters')"
+    echo "   Current: SFW=$CONFIG_SEARCH_PURITY_SFW, Sketchy=$CONFIG_SEARCH_PURITY_SKETCHY, NSFW=$CONFIG_SEARCH_PURITY_NSFW"
+    read -rp "   Include SFW? (y/n) [y]: " wizard_pur_s
+    read -rp "   Include Sketchy? (y/n) [y]: " wizard_pur_k
+    read -rp "   Include NSFW? (y/n) [n]: " wizard_pur_n
+    if [[ "${wizard_pur_s:-y}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_SFW=.*|CONFIG_SEARCH_PURITY_SFW="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_SFW=.*|CONFIG_SEARCH_PURITY_SFW="false"|' "$CONFIG_FILE"
+    fi
+    if [[ "${wizard_pur_k:-y}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_SKETCHY=.*|CONFIG_SEARCH_PURITY_SKETCHY="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_SKETCHY=.*|CONFIG_SEARCH_PURITY_SKETCHY="false"|' "$CONFIG_FILE"
+    fi
+    if [[ "${wizard_pur_n:-n}" =~ ^[Yy]$ ]]; then
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_NSFW=.*|CONFIG_SEARCH_PURITY_NSFW="true"|' "$CONFIG_FILE"
+    else
+        sed -i.bak 's|^CONFIG_SEARCH_PURITY_NSFW=.*|CONFIG_SEARCH_PURITY_NSFW="false"|' "$CONFIG_FILE"
+    fi
+    rm -f "${CONFIG_FILE}.bak"
+    echo ""
+
+    echo "$(_c green 'Setup complete!')"
+    echo "$(_c dim 'You can always re-run this with: walfzf wizard')"
+    echo "$(_c dim 'Or edit the config directly with: walfzf edit')"
+    echo ""
 }
 
 _usage() {
-    local script_name; if [[ -n "${BASH_SOURCE[0]}" && -f "${BASH_SOURCE[0]}" ]]; then script_name=$(basename "${BASH_SOURCE[0]}"); else script_name="wallhaven.sh"; fi
+    local script_name; if [[ -n "${BASH_SOURCE[0]}" && -f "${BASH_SOURCE[0]}" ]]; then script_name=$(basename "${BASH_SOURCE[0]}"); else script_name="walfzf"; fi
     cat <<EOF
-$script_name - Search and download wallpapers from wallhaven.cc
+$(_c bold "$script_name") - Search, preview, and download wallpapers from $(_c cyan 'wallhaven.cc')
 
-Usage:
+$(_c bold 'Usage:')
   $script_name [command] [options] [arguments]
 
-Commands:
-  search (s) <query> [options]
-    Search for wallpapers.
-    Options for search:
-      -p <page>, --page <page>        Start search from a specific page number.
-      -b, --background-preload        Preload images on the first page for faster previews.
-                                      (Overrides config if specified).
-      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+$(_c bold 'Search Commands:')
+  $(_c cyan 'search (s)')  <query> [options]    Search wallpapers
+    $(_c dim '-p, --page <n>')       Start from page N
+    $(_c dim '-b, --background-preload')  Preload all images for faster previews
+    $(_c dim '-t, --thumbs')         Use low-res thumbnails for faster loading
 
-  latest (l) [options]
-    Browse latest wallpapers.
-    Options:
-      -p <page>, --page <page>        Start from a specific page number.
-      -b, --background-preload        Preload images before showing fzf.
-      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+  $(_c cyan 'latest (l)') [options]              Browse newest wallpapers
+    $(_c dim 'Same options as search')
 
-  toplist (t) [options]
-    Browse top wallpapers.
-    Options:
-      -p <page>, --page <page>        Start from a specific page number.
-      -r <range>, --range <range>     Time range: 1d, 3d, 1w, 1M, 3M, 6M, 1y (default: from config).
-      -b, --background-preload        Preload images before showing fzf.
-      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+  $(_c cyan 'toplist (t)') [options]             Browse top-rated wallpapers
+    $(_c dim '-r, --range <range>')  Time range: 1d, 3d, 1w, 1M, 3M, 6M, 1y
+    $(_c dim 'Same options as search')
 
-  random (r) [options]
-    Browse random wallpapers.
-    Options:
-      -p <page>, --page <page>        Start from a specific page number.
-      -s <seed>, --seed <seed>        Seed for reproducible random results.
-      -b, --background-preload        Preload images before showing fzf.
-      -t, --thumbs                    Use low-res thumbnails for faster preview loading.
+  $(_c cyan 'random (r)') [options]              Browse random wallpapers
+    $(_c dim '-s, --seed <seed>')    Seed for reproducible results
+    $(_c dim 'Same options as search')
 
-  tags [filter|sort] [options]
-    Browse and select from popular tags on wallhaven.cc.
-    Selecting a tag immediately starts a search for it.
-    Sort options (pick one): popular (default), viewed, tagged, subs
-    Pass any other argument as a text filter (e.g., "anime").
-    Examples:
-      walfzf tags                     # Show all popular tags, pick one
-      walfzf tags anime               # Filter tags matching "anime", pick one
-      walfzf tags viewed              # Sort by most viewed tags
-      walfzf tags subs                # Sort by most subscribed tags
+  $(_c cyan 'tags') [filter|sort]                Browse popular tags
+    $(_c dim 'Sort: popular (default), viewed, tagged, subs')
+    $(_c dim 'Filter: pass any text to filter tags')
 
-  download (d) <image_id...>
-    Download specific image(s) by their Wallhaven ID.
+$(_c bold 'Browse & Download:')
+  $(_c cyan 'download (d)') <id...>              Download wallpapers by Wallhaven ID
+  $(_c cyan 'collection (c)') <user> [coll_id]   Browse user collections
+    $(_c dim '-p, --page <n>')       Start from page N
+    $(_c dim '-a, --all')            Download all images from collection
 
-  collection (c) <username> [collection_id] [options]
-    Browse and download from a user's public collections.
-    If collection_id is omitted, lists user's collections to choose from.
-    Options for collection:
-      -p <page>, --page <page>        Start browsing collection from a specific page.
-      -a, --all                       Download all images from the selected collection.
+$(_c bold 'Favorites & History:')
+  $(_c cyan 'info') <id>                          Show detailed wallpaper info
+  $(_c cyan 'fav') [add|rm|list|dl] [id]         Manage favorite wallpapers
+    $(_c dim 'fav add <id>')         Add wallpaper to favorites
+    $(_c dim 'fav rm <id>')          Remove from favorites
+    $(_c dim 'fav list')             List all favorites
+    $(_c dim 'fav dl')              Download all favorites
 
-  edit (e)
-    Open the configuration file in the defined editor.
+  $(_c cyan 'history') [limit]                     Show recent activity (default: 20)
+  $(_c cyan 'history-clear')                       Clear all history
 
-  setup [folder]
-    Set or view the wallpaper save folder.
-    Examples:
-      walfzf setup                     # Show current folder
-      walfzf setup ~/Pictures/walls    # Set folder (supports ~)
-      walfzf setup --folder /tmp/walls # Same, with explicit flag
+$(_c bold 'Wallpaper:')
+  $(_c cyan 'setwall') <id>                       Set wallpaper as desktop (macOS only)
 
-  help (h), --help, -h
-    Show this help message.
+$(_c bold 'Configuration:')
+  $(_c cyan 'edit (e)')                           Open config file in editor
+  $(_c cyan 'setup') [folder]                     View or change save folder
+  $(_c cyan 'wizard')                             Interactive setup wizard
 
-Configuration File: $CONFIG_FILE
-Debug messages (sent to stderr), including image file checks for previews,
-can be enabled by setting the WALLHAVEN_CLI_DEBUG=1 environment variable.
-Example: WALLHAVEN_CLI_DEBUG=1 $script_name search nature
+$(_c bold 'Help:')
+  $(_c cyan 'help (h)')                           Show this help message
+
+$(_c dim 'Config: $CONFIG_FILE')
+$(_c dim 'Debug: WALLHAVEN_CLI_DEBUG=1 $script_name search nature')
 EOF
 }
 
 main() {
     if [[ "${1:-}" == "--is-preview" && "${2:-}" == "--actual-config-path" ]]; then
-        local cfg_path_preview="$3"; cfg_path_preview="${cfg_path_preview#\'}"; cfg_path_preview="${cfg_path_preview%\'}" 
+        local cfg_path_preview="$3"; cfg_path_preview="${cfg_path_preview#\'}"; cfg_path_preview="${cfg_path_preview%\'}"
         local preview_thumb_mode="false"
         shift 3
         if [[ "${1:-}" == "--thumb-mode" ]]; then preview_thumb_mode="true"; shift; fi
-        if [[ -f "$cfg_path_preview" ]]; then 
+        if [[ -f "$cfg_path_preview" ]]; then
             # shellcheck source=/dev/null
-            source "$cfg_path_preview"; 
+            source "$cfg_path_preview";
         else
-            echo "walfzf: Preview Warning: Config '$cfg_path_preview' not found. Using defaults for preview temp folder." >&2
+            echo "walfzf: Preview Warning: Config '$cfg_path_preview' not found. Using defaults." >&2
             CONFIG_TEMP_FOLDER="${DEFAULT_TEMP_FOLDER}"
         fi
-        mkdir -p "$CONFIG_TEMP_FOLDER/preview_cache" 
+        mkdir -p "$CONFIG_TEMP_FOLDER/preview_cache"
 
         if [[ "${1:-}" == "preview" ]]; then THUMB_MODE="$preview_thumb_mode" cmd_preview "${@:2}"; exit $?;
-        else echo "walfzf: Error: Preview invocation structure incorrect. Expected 'preview <text_line>'." >&2; exit 1; fi
+        else echo "walfzf: Error: Preview invocation structure incorrect." >&2; exit 1; fi
     fi
 
-    _ensure_deps; _load_config; _ensure_dirs 
+    _ensure_deps; _load_config; _ensure_dirs
 
     THUMB_MODE="false"
-    local COMMAND="${1:-help}" 
-    [[ $# -gt 0 ]] && shift || true 
-    
+    local COMMAND="${1:-help}"
+    [[ $# -gt 0 ]] && shift || true
+
     case "$COMMAND" in
         search|s) cmd_search "$@" ;;
         latest|l) cmd_latest "$@" ;;
@@ -886,6 +1233,31 @@ main() {
         edit|e) cmd_edit "$@" ;;
         collection|c) cmd_collection "$@" ;;
         setup) cmd_setup "$@" ;;
+        wizard) cmd_wizard "$@" ;;
+        info)
+            if [[ $# -eq 0 ]]; then _log_error "Wallpaper ID required."; _usage; exit 1; fi
+            _show_wallpaper_info "$1"
+            ;;
+        fav|favorites)
+            local fav_action="${1:-list}"
+            case "$fav_action" in
+                add) [[ $# -lt 2 ]] && { _log_error "ID required."; exit 1; }; _fav_add "$2" ;;
+                rm|remove) [[ $# -lt 2 ]] && { _log_error "ID required."; exit 1; }; _fav_remove "$2" ;;
+                list) _fav_list ;;
+                dl|download) _fav_download_all ;;
+                *) _log_error "Unknown fav action: $fav_action. Use: add, rm, list, dl"; exit 1 ;;
+            esac
+            ;;
+        history)
+            _history_show "${1:-20}"
+            ;;
+        history-clear)
+            _history_clear
+            ;;
+        setwall|set-wallpaper)
+            if [[ $# -eq 0 ]]; then _log_error "Wallpaper ID required."; _usage; exit 1; fi
+            _set_wallpaper "$1"
+            ;;
         help|h|--help|-h) _usage ;;
         *) _log_error "Unknown command: $COMMAND"; _usage; exit 1 ;;
     esac
