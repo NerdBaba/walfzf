@@ -673,7 +673,6 @@ cmd_search() {
     local background_preload_cmd_flag="false"
     local query_args=()
 
-    local found_query=0
     while [[ $# -gt 0 ]]; do
         case "$1" in
             -p|--page)
@@ -686,13 +685,8 @@ cmd_search() {
             --) shift ;;
             -*) _log_error "Unknown option for search: $1"; _usage; return 1 ;;
             *)
-                if [[ $found_query -eq 0 ]]; then
-                    query_args+=("$1")
-                    found_query=1
-                    shift
-                else
-                    _log_error "Too many arguments for search."; _usage; return 1
-                fi
+                query_args+=("$1")
+                shift
                 ;;
         esac
     done
